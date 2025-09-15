@@ -1,0 +1,379 @@
+<div class="card mb-4">
+    <div class="card-body">
+        <h5 class="card-title"><i class="fas fa-lightbulb text-warning"></i> How Educational Standards Clustering Works</h5>
+        <div class="row">
+            <div class="col-md-4">
+                <h6>🎯 What You'll See</h6>
+                <p class="small">Each dot = one educational standard. Standards that teach similar concepts cluster together as colored groups.</p>
+                <div class="alert alert-info alert-sm py-2">
+                    <strong>Tip:</strong> Larger clusters = more states teaching similar concepts
+                </div>
+            </div>
+            <div class="col-md-4">
+                <h6>🎛️ Controls Guide</h6>
+                <ul class="small mb-2">
+                    <li><strong>Cluster Size:</strong> Minimum standards needed to form a group</li>
+                    <li><strong>Strictness:</strong> How similar standards must be to group together</li>
+                    <li><strong>Neighborhood:</strong> How many nearby standards to consider</li>
+                </ul>
+                <small class="text-muted">Try the <strong>Quick Presets</strong> below for common use cases!</small>
+            </div>
+            <div class="col-md-4">
+                <h6>📊 Reading Results</h6>
+                <p class="small">Look for:</p>
+                <ul class="small mb-0">
+                    <li><span class="badge bg-success">Large clusters</span> = Common concepts across states</li>
+                    <li><span class="badge bg-warning">Small clusters</span> = Specialized or unique approaches</li>
+                    <li><span class="badge bg-secondary">Scattered dots</span> = Unique standards</li>
+                </ul>
+                <div class="mt-2">
+                    <small class="text-muted">Use the <strong>Help</strong> button for detailed explanations.</small>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="control-panel" id="embeddings-control-panel">
+    <h5 class="mb-3"><i class="fas fa-sliders-h"></i> Clustering Controls</h5>
+    
+    <div class="preset-controls mb-4">
+        <h6><i class="fas fa-magic text-primary"></i> Quick Presets</h6>
+        <div class="btn-group" role="group">
+            <button type="button" class="btn btn-outline-primary btn-sm" onclick="applyPreset('broad-overview')">
+                <i class="fas fa-eye"></i> Broad Overview
+                <small class="d-block">See major topic areas</small>
+            </button>
+            <button type="button" class="btn btn-outline-success btn-sm" onclick="applyPreset('detailed-analysis')">
+                <i class="fas fa-search"></i> Detailed Analysis  
+                <small class="d-block">Find specific similarities</small>
+            </button>
+            <button type="button" class="btn btn-outline-info btn-sm" onclick="applyPreset('subject-focused')">
+                <i class="fas fa-book"></i> Subject Focused
+                <small class="d-block">Group by subject areas</small>
+            </button>
+        </div>
+    </div>
+
+    <form id="controls-form" class="row g-3">
+        <div class="col-md-3">
+            <label for="grade-level" class="form-label">
+                <i class="fas fa-graduation-cap"></i> Grade Level
+            </label>
+            <select id="grade-level" class="form-select">
+                <option value="">All Grades</option>
+                {% for grade in grade_levels %}
+                <option value="{{ grade.grade_numeric }}">{{ grade.grade }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label for="subject-area" class="form-label">
+                <i class="fas fa-book-open"></i> Subject Area
+            </label>
+            <select id="subject-area" class="form-select">
+                <option value="">All Subjects</option>
+                {% for subject in subject_areas %}
+                <option value="{{ subject.id }}">{{ subject.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label for="cluster-size" class="form-label">
+                <i class="fas fa-layer-group"></i> Min Cluster Size
+            </label>
+            <input type="range" class="form-range" id="cluster-size" min="2" max="30" value="5">
+            <div class="d-flex justify-content-between small text-muted">
+                <span>Specific (2)</span>
+                <span id="cluster-size-value" class="fw-bold">5</span>
+                <span>Broad (30)</span>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <label for="epsilon" class="form-label">
+                <i class="fas fa-bullseye"></i> Strictness
+            </label>
+            <input type="range" class="form-range" id="epsilon" min="0.05" max="1.0" step="0.05" value="0.5">
+            <div class="d-flex justify-content-between small text-muted">
+                <span>Precise</span>
+                <span id="epsilon-value" class="fw-bold">0.5</span>
+                <span>Flexible</span>
+            </div>
+        </div>
+
+        <div class="col-md-3">
+            <label for="viz-mode" class="form-label">
+                <i class="fas fa-cube"></i> View Mode
+            </label>
+            <select id="viz-mode" class="form-select">
+                <option value="2d">2D Scatter</option>
+                <option value="3d">3D Scatter</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label for="n-neighbors" class="form-label">
+                <i class="fas fa-users"></i> Neighborhood Size
+            </label>
+            <input type="range" class="form-range" id="n-neighbors" min="5" max="50" value="15">
+            <div class="d-flex justify-content-between small text-muted">
+                <span>Local (5)</span>
+                <span id="n-neighbors-value" class="fw-bold">15</span>
+                <span>Global (50)</span>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <label for="clustering-method" class="form-label">
+                <i class="fas fa-project-diagram"></i> Clustering Method
+            </label>
+            <select id="clustering-method" class="form-select">
+                <option value="hdbscan">Smart Density (Recommended)</option>
+                <option value="similarity">Simple Similarity</option>
+                <option value="hierarchical">Hierarchical Tree</option>
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label for="subject-focus" class="form-label">
+                <i class="fas fa-balance-scale"></i> Subject Focus
+            </label>
+            <select id="subject-focus" class="form-select">
+                <option value="mixed">Mixed Subjects (Default)</option>
+                <option value="prefer-same">Prefer Same Subject</option>
+                <option value="separate-subjects">Separate by Subject</option>
+            </select>
+        </div>
+    </form>
+
+    <div class="row mt-3">
+        <div class="col-md-8">
+            <button type="button" id="update-viz" class="btn btn-primary">
+                <i class="fas fa-sync-alt"></i> Update Report
+            </button>
+        </div>
+        <div class="col-md-4 text-end">
+            <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#advanced-controls" aria-expanded="false">
+                <i class="fas fa-cogs"></i> Advanced Settings
+            </button>
+            <button type="button" class="btn btn-outline-info btn-sm" data-bs-toggle="modal" data-bs-target="#clustering-help">
+                <i class="fas fa-question-circle"></i> Help
+            </button>
+        </div>
+    </div>
+
+    <div class="collapse mt-3" id="advanced-controls">
+        <div class="card card-body">
+            <h6 class="mb-3">Advanced Parameters</h6>
+            <div class="row g-3">
+                <div class="col-md-3">
+                    <label for="max-standards" class="form-label">Max Standards</label>
+                    <input type="number" class="form-control" id="max-standards" value="500" min="100" max="2000">
+                </div>
+                <div class="col-md-3">
+                    <label for="standards-per-cluster" class="form-label">Standards per Cluster</label>
+                    <input type="number" class="form-control" id="standards-per-cluster" value="25" min="5" max="100">
+                </div>
+                <div class="col-md-3">
+                    <label for="secondary-threshold" class="form-label">Secondary Link Threshold</label>
+                    <input type="number" class="form-control" id="secondary-threshold" value="0.5" step="0.05" min="0" max="1">
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<ul class="nav nav-tabs" id="viz-tabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="scatter-tab" data-bs-toggle="tab" data-bs-target="#scatter-pane" type="button" role="tab">
+            📍 Semantic Clustering
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="heatmap-tab" data-bs-toggle="tab" data-bs-target="#heatmap-pane" type="button" role="tab">
+            Similarity Matrix
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="network-tab" data-bs-toggle="tab" data-bs-target="#network-pane" type="button" role="tab">
+            Network Graph
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="search-tab" data-bs-toggle="tab" data-bs-target="#search-pane" type="button" role="tab">
+            Semantic Search
+        </button>
+    </li>
+</ul>
+
+<div class="tab-content" id="viz-tab-content">
+    <div class="tab-pane fade show active" id="scatter-pane" role="tabpanel">
+        <div class="visualization-container">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h5 class="mb-0">📊 Topic Clusters</h5>
+                <span id="scatter-info" class="text-muted">Loading...</span>
+            </div>
+            <div class="alert alert-info py-2 mb-3">
+                <small><strong>Interpretation:</strong> Points closer together have more similar context. Distinct clusters represent different pedagogical approaches or subject.</small>
+            </div>
+            <div class="position-relative">
+                <div id="scatter-plot" class="scatter-plot"></div>
+                <div id="scatter-loading" class="loading-overlay d-none">
+                    <div class="spinner-border text-primary" role="status"></div>
+                </div>
+            </div>
+            <div id="state-legend" class="state-legend"></div>
+            <div class="mt-3 mb-3">
+                <h6><i class="fas fa-palette"></i> Topic Categories</h6>
+                <div class="d-flex flex-wrap gap-2 small">
+                    <span><span class="badge bg-info me-1"></span>Government & Civics</span>
+                    <span><span class="badge bg-success me-1"></span>Geography & Maps</span>
+                    <span><span class="badge bg-warning me-1"></span>History & Timeline</span>
+                    <span><span class="badge bg-danger me-1"></span>Mathematics</span>
+                    <span><span class="badge bg-dark me-1"></span>Science</span>
+                    <span><span class="badge bg-primary me-1"></span>Other Topics</span>
+                </div>
+            </div>
+            <div id="cluster-info" class="mt-3"></div>
+        </div>
+    </div>
+
+    <div class="tab-pane fade" id="heatmap-pane" role="tabpanel">
+        <div class="visualization-container">
+            <div class="row mb-3">
+                <div class="col-md-8">
+                    <h5 class="mb-0">
+                        <span id="heatmap-title">📊 Topic Coverage Heat Map</span>
+                        <small class="text-muted ms-2" id="heatmap-subtitle">Topic clusters × states coverage analysis</small>
+                        <span class="ms-2 text-muted small" id="heatmap-info"></span>
+                    </h5>
+                </div>
+                <div class="col-md-4 text-end">
+                    <div class="btn-group" role="group">
+                        <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadHeatMapData('topic')">Topic Coverage</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadHeatMapData('enhanced_state')">State Coverage</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadHeatMapData('enhanced_state')">Enhanced State</button>
+                    </div>
+                </div>
+            </div>
+            <div class="row mb-3">
+                <div class="col-md-6">
+                    <label class="form-label" for="heatmap-type">Heat Map Type</label>
+                    <select id="heatmap-type" class="form-select">
+                        <option value="topic">Topic Coverage</option>
+                        <option value="enhanced_state">Enhanced State Coverage</option>
+                    </select>
+                </div>
+                <div class="col-md-6">
+                    <label class="form-label" for="heatmap-colorscheme">Color Scheme</label>
+                    <select id="heatmap-colorscheme" class="form-select">
+                        <option value="Blues">Blues</option>
+                        <option value="Greens">Greens</option>
+                        <option value="Reds">Reds</option>
+                        <option value="Viridis">Viridis</option>
+                        <option value="Plasma">Plasma</option>
+                    </select>
+                </div>
+            </div>
+            <div class="position-relative">
+                <div id="heatmap" class="heatmap"></div>
+                <div id="heatmap-loading" class="loading-overlay d-none">
+                    <div class="spinner-border text-primary" role="status"></div>
+                </div>
+            </div>
+            <div id="heatmap-description" class="mt-2"></div>
+            <div id="heatmap-stats" class="mt-3"></div>
+        </div>
+    </div>
+
+    <div class="tab-pane fade" id="network-pane" role="tabpanel">
+        <div class="visualization-container">
+            <div class="row mb-3">
+                <div class="col-md-8">
+                    <h5 class="mb-0">
+                        <span id="network-title">🔗 Standards Relationship Network</span>
+                        <small class="text-muted ms-2">Scroll to zoom • Drag to pan • Drag nodes to reposition</small>
+                    </h5>
+                </div>
+                <div class="col-md-4 text-end">
+                    <div class="btn-group" role="group">
+                        <button class="btn btn-outline-primary btn-sm" onclick="resetNetworkLayout()"><i class="fas fa-redo"></i> Reset Layout</button>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="exportNetworkGraph('png')"><i class="fas fa-download"></i> Export</button>
+                    </div>
+                </div>
+            </div>
+            <div class="row mb-3">
+                <div class="col-md-3">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="show-common-concepts" checked>
+                        <label class="form-check-label" for="show-common-concepts">Show Common Concepts (5+ states)</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="show-semi-common-concepts" checked>
+                        <label class="form-check-label" for="show-semi-common-concepts">Show Semi-Common (2-4 states)</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="show-state-specific" checked>
+                        <label class="form-check-label" for="show-state-specific">Show State-Specific</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="show-standards" checked>
+                        <label class="form-check-label" for="show-standards">Show Standards</label>
+                    </div>
+                </div>
+                <div class="col-md-9 text-end">
+                    <small class="text-muted">Filter network nodes by concept type to focus on specific relationships.</small>
+                </div>
+            </div>
+            <div class="position-relative">
+                <div id="network-graph" class="network-graph"></div>
+                <div id="network-loading" class="loading-overlay d-none">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading network graph...</span>
+                    </div>
+                </div>
+            </div>
+            <div class="row mt-3">
+                <div class="col-md-6">
+                    <div id="network-stats" class="small text-muted"></div>
+                </div>
+                <div class="col-md-6 text-end">
+                    <div id="network-legend" class="small text-muted">
+                        <strong>Legend:</strong> 
+                        <span style="color: #FF6B6B;">●</span> Concepts | 
+                        <span style="color: #4ECDC4;">●</span> Standards | 
+                        <span style="border-bottom: 1px solid #999;">—</span> Implements | 
+                        <span style="border-bottom: 1px dashed #999;">- -</span> Similar
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="tab-pane fade" id="search-pane" role="tabpanel">
+        <div class="visualization-container">
+            {% include 'dashboard/partials/semantic_search.html' with title='Semantic Concept Search' enable_selection=False mode='view' %}
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="clustering-help" tabindex="-1" aria-labelledby="clustering-help-label" aria-hidden="true">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="clustering-help-label">
+                    <i class="fas fa-graduation-cap text-primary"></i> Educational Standards Clustering Guide
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="accordion" id="help-accordion">
+                    <!-- accordion content omitted for brevity -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" onclick="applyPreset('broad-overview')" data-bs-dismiss="modal">
+                    <i class="fas fa-play"></i> Try Broad Overview
+                </button>
+            </div>
+        </div>
+    </div>
+</div>

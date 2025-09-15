@@ -2,6 +2,7 @@
 Secure API views for embeddings visualization with proper validation and caching
 """
 from typing import Dict, List, Optional, Any
+from uuid import UUID
 from django.http import JsonResponse
 from django.core.exceptions import ValidationError
 from django.db.models import Q, Avg
@@ -62,6 +63,22 @@ class EmbeddingsAPIView(BaseAPIView):
                     return self.get_cached_or_calculate(cache_key, calculation_func, ttl)
         return data
 
+    def parse_standard_ids(self, request) -> List[str]:
+        """Parse and validate standard IDs provided in request (if any)"""
+        raw_ids = request.GET.getlist('standard_ids')
+        if len(raw_ids) == 1 and ',' in raw_ids[0]:
+            raw_ids = [part.strip() for part in raw_ids[0].split(',') if part.strip()]
+
+        cleaned_ids = []
+        for raw_id in raw_ids:
+            if not raw_id:
+                continue
+            try:
+                cleaned_ids.append(str(UUID(str(raw_id))))
+            except (ValueError, TypeError):
+                raise ValidationError(f"Invalid standard ID: {raw_id}")
+        return cleaned_ids
+
 
 @api_endpoint(['GET'])
 def embeddings_visualization_data_api(request):
@@ -69,6 +86,11 @@ def embeddings_visualization_data_api(request):
     view = EmbeddingsAPIView()
     
     try:
+        # Parse explicit standard IDs if provided (custom cluster use case)
+        standard_ids = view.parse_standard_ids(request)
+
+        standard_ids = view.parse_standard_ids(request)
+
         # Validate parameters
         grade_level = request.GET.get('grade_level')
         if grade_level and grade_level.strip():
@@ -96,72 +118,84 @@ def embeddings_visualization_data_api(request):
             viz_mode = '2d'
         
         # Create cache key for this specific request
-        cache_key = f"embeddings_viz_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}_{viz_mode}"
-        logger.info(f"Cache key: {cache_key} (cluster_size={cluster_size}, epsilon={epsilon})")
-        
+        if not standard_ids:
+            cache_key = f"embeddings_viz_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}_{viz_mode}"
+            logger.info(f"Cache key: {cache_key} (cluster_size={cluster_size}, epsilon={epsilon})")
+        else:
+            cache_key = None
+            logger.info(f"Visualization request with explicit standards ({len(standard_ids)})")
+
         def calculate_visualization_data():
-            # Filter standards with proper query optimization
-            standards_query = Standard.objects.filter(
-                embedding__isnull=False
-            ).select_related('state', 'subject_area')
-            
-            if grade_level is not None:
-                standards_query = standards_query.filter(
-                    grade_levels__grade_numeric=grade_level
-                ).distinct()
-            
-            if subject_area_id:
-                standards_query = standards_query.filter(subject_area_id=subject_area_id)
-            
-            # Limit for performance and memory management
-            standards = list(standards_query[:2000])  # Increased limit but still reasonable
+            # Determine standards to analyze
+            if standard_ids:
+                standards_query = Standard.objects.filter(
+                    id__in=standard_ids,
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area').prefetch_related('grade_levels')
+                standards = list(standards_query)
+                # Preserve selection order
+                order_map = {sid: index for index, sid in enumerate(standard_ids)}
+                standards.sort(key=lambda s: order_map.get(str(s.id), 0))
+            else:
+                standards_query = Standard.objects.filter(
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area')
+
+                if grade_level is not None:
+                    standards_query = standards_query.filter(
+                        grade_levels__grade_numeric=grade_level
+                    ).distinct()
+
+                if subject_area_id:
+                    standards_query = standards_query.filter(subject_area_id=subject_area_id)
+
+                # Limit for performance and memory management
+                standards = list(standards_query[:2000])  # Increased limit but still reasonable
             
             if not standards:
                 # Provide detailed information about why no data was found
-                criteria_info = []
-                if grade_level is not None:
-                    criteria_info.append(f"grade level {grade_level}")
-                if subject_area_id:
-                    try:
-                        from standards.models import SubjectArea
-                        subject_area = SubjectArea.objects.get(id=subject_area_id)
-                        criteria_info.append(f"subject area '{subject_area.name}'")
-                    except:
-                        criteria_info.append(f"subject area ID {subject_area_id}")
-                
-                criteria_text = " and ".join(criteria_info) if criteria_info else "your filter criteria"
-                
-                # Check if standards exist without embeddings for better debugging
-                standards_without_embeddings_query = Standard.objects.all()
-                if grade_level is not None:
-                    standards_without_embeddings_query = standards_without_embeddings_query.filter(
-                        grade_levels__grade_numeric=grade_level
-                    ).distinct()
-                if subject_area_id:
-                    standards_without_embeddings_query = standards_without_embeddings_query.filter(
-                        subject_area_id=subject_area_id
-                    )
-                
-                total_matching_standards = standards_without_embeddings_query.count()
-                standards_with_embeddings_count = standards_without_embeddings_query.filter(
-                    embedding__isnull=False
-                ).count()
-                
-                # Provide specific guidance based on the situation
-                if total_matching_standards == 0:
-                    message = f'No standards found for {criteria_text}. Try different filter criteria.'
-                elif standards_with_embeddings_count == 0:
-                    message = f'Found {total_matching_standards} standards for {criteria_text}, but none have embeddings. Run the generate_embeddings management command to create embeddings.'
+                if standard_ids:
+                    message = 'No embeddings found for the selected standards.'
+                    debug_info = {
+                        'requested_standard_ids': standard_ids,
+                        'found_matching_standards': 0
+                    }
                 else:
-                    message = f'No standards with embeddings found for {criteria_text}'
-                
-                return {
-                    'scatter_data': [],
-                    'clusters': [],
-                    'state_colors': {},
-                    'total_standards': 0,
-                    'message': message,
-                    'debug_info': {
+                    criteria_info = []
+                    if grade_level is not None:
+                        criteria_info.append(f"grade level {grade_level}")
+                    if subject_area_id:
+                        try:
+                            subject_area = SubjectArea.objects.get(id=subject_area_id)
+                            criteria_info.append(f"subject area '{subject_area.name}'")
+                        except SubjectArea.DoesNotExist:
+                            criteria_info.append(f"subject area ID {subject_area_id}")
+
+                    criteria_text = " and ".join(criteria_info) if criteria_info else "your filter criteria"
+
+                    standards_without_embeddings_query = Standard.objects.all()
+                    if grade_level is not None:
+                        standards_without_embeddings_query = standards_without_embeddings_query.filter(
+                            grade_levels__grade_numeric=grade_level
+                        ).distinct()
+                    if subject_area_id:
+                        standards_without_embeddings_query = standards_without_embeddings_query.filter(
+                            subject_area_id=subject_area_id
+                        )
+
+                    total_matching_standards = standards_without_embeddings_query.count()
+                    standards_with_embeddings_count = standards_without_embeddings_query.filter(
+                        embedding__isnull=False
+                    ).count()
+
+                    if total_matching_standards == 0:
+                        message = f'No standards found for {criteria_text}. Try different filter criteria.'
+                    elif standards_with_embeddings_count == 0:
+                        message = f'Found {total_matching_standards} standards for {criteria_text}, but none have embeddings. Run the generate_embeddings management command to create embeddings.'
+                    else:
+                        message = f'No standards with embeddings found for {criteria_text}'
+
+                    debug_info = {
                         'total_standards_in_db': Standard.objects.count(),
                         'standards_with_embeddings': Standard.objects.filter(embedding__isnull=False).count(),
                         'standards_matching_criteria': total_matching_standards,
@@ -171,6 +205,14 @@ def embeddings_visualization_data_api(request):
                             'subject_area_id': subject_area_id
                         }
                     }
+
+                return {
+                    'scatter_data': [],
+                    'clusters': [],
+                    'state_colors': {},
+                    'total_standards': 0,
+                    'message': message,
+                    'debug_info': debug_info
                 }
             
             # Prepare color palette
@@ -447,16 +489,19 @@ def embeddings_visualization_data_api(request):
                 }
             }
         
-        # Cache enabled with auto-clearing of stale data
-        visualization_data = view.get_cached_or_calculate(cache_key, calculate_visualization_data)
-        
+        if cache_key:
+            visualization_data = view.get_cached_or_calculate(cache_key, calculate_visualization_data)
+        else:
+            visualization_data = calculate_visualization_data()
+
         # Add parameters to response
         visualization_data['parameters'] = {
             'grade_level': grade_level,
             'subject_area': subject_area_id,
             'cluster_size': cluster_size,
             'epsilon': epsilon,
-            'viz_mode': viz_mode
+            'viz_mode': viz_mode,
+            'standard_ids': standard_ids
         }
         
         return view.success_response(visualization_data)
@@ -485,54 +530,111 @@ def embeddings_similarity_matrix_api(request):
             subject_area_id = view.validate_integer(subject_area_id, 1, None, "subject_area")
         
         # Create cache key
-        cache_key = f"similarity_matrix_{grade_level}_{subject_area_id}"
-        
+        cache_key = None
+        if not standard_ids:
+            cache_key = f"similarity_matrix_{grade_level}_{subject_area_id}"
+
         def calculate_similarity_matrix():
-            # Get states that have standards matching criteria
+            if standard_ids:
+                standards = list(Standard.objects.filter(
+                    id__in=standard_ids,
+                    embedding__isnull=False,
+                    state__isnull=False
+                ).select_related('state'))
+
+                if not standards:
+                    return {
+                        'states': [],
+                        'similarity_matrix': [],
+                        'error': 'No embeddings found for the selected standards'
+                    }
+
+                state_vectors = {}
+                for std in standards:
+                    try:
+                        vector = np.array(std.embedding, dtype=np.float32)
+                    except (TypeError, ValueError):
+                        continue
+                    state_vectors.setdefault(std.state.code, []).append(vector)
+
+                if not state_vectors:
+                    return {
+                        'states': [],
+                        'similarity_matrix': [],
+                        'error': 'Unable to compute state vectors for the selected standards'
+                    }
+
+                state_codes = sorted(state_vectors.keys())
+                centroids = {}
+                for code, vectors in state_vectors.items():
+                    centroids[code] = np.mean(np.stack(vectors), axis=0)
+
+                similarity_matrix = []
+                for code1 in state_codes:
+                    row = []
+                    vec1 = centroids[code1]
+                    norm1 = np.linalg.norm(vec1)
+                    for code2 in state_codes:
+                        if code1 == code2:
+                            similarity = 1.0
+                        else:
+                            vec2 = centroids[code2]
+                            norm2 = np.linalg.norm(vec2)
+                            if norm1 == 0 or norm2 == 0:
+                                similarity = 0.0
+                            else:
+                                similarity = float(np.dot(vec1, vec2) / (norm1 * norm2))
+                                similarity = max(-1.0, min(1.0, similarity))
+                        row.append(round(similarity, 3))
+                    similarity_matrix.append(row)
+
+                return {
+                    'states': state_codes,
+                    'similarity_matrix': similarity_matrix,
+                    'total_states': len(state_codes)
+                }
+
+            # Existing logic when no explicit standard IDs supplied
             states_query = State.objects.filter(
                 standards__embedding__isnull=False
             ).distinct()
-            
+
             if grade_level is not None:
                 states_query = states_query.filter(
                     standards__grade_levels__grade_numeric=grade_level
                 )
-            
+
             if subject_area_id:
                 states_query = states_query.filter(
                     standards__subject_area_id=subject_area_id
                 )
-            
+
             states = list(states_query.order_by('code'))
-            
+
             if not states:
                 return {
                     'states': [],
                     'similarity_matrix': [],
                     'error': 'No states found with standards matching the criteria'
                 }
-            
-            # Calculate similarity matrix with performance optimization
+
             similarity_matrix = []
             state_codes = [state.code for state in states]
-            
-            # Use batch queries for better performance
+
             correlations_cache = {}
             all_correlations = StandardCorrelation.objects.filter(
                 Q(standard_1__state__in=states) | Q(standard_2__state__in=states)
             ).select_related('standard_1__state', 'standard_2__state')
-            
-            # Build correlation lookup
+
             for corr in all_correlations:
                 state1_code = corr.standard_1.state.code
                 state2_code = corr.standard_2.state.code
                 key = tuple(sorted([state1_code, state2_code]))
-                
+
                 if key not in correlations_cache:
                     correlations_cache[key] = []
                 correlations_cache[key].append(corr.similarity_score)
-            
-            # Build matrix
+
             for state1 in states:
                 row = []
                 for state2 in states:
@@ -541,27 +643,30 @@ def embeddings_similarity_matrix_api(request):
                     else:
                         key = tuple(sorted([state1.code, state2.code]))
                         scores = correlations_cache.get(key, [])
-                        
+
                         if scores:
                             similarity = sum(scores) / len(scores)
                         else:
                             similarity = 0.0
-                    
+
                     row.append(round(similarity, 3))
                 similarity_matrix.append(row)
-            
+
             return {
                 'states': state_codes,
                 'similarity_matrix': similarity_matrix,
                 'total_states': len(state_codes)
             }
-        
-        matrix_data = view.get_cached_or_calculate(cache_key, calculate_similarity_matrix)
-        
-        # Add parameters to response
+
+        if cache_key:
+            matrix_data = view.get_cached_or_calculate(cache_key, calculate_similarity_matrix)
+        else:
+            matrix_data = calculate_similarity_matrix()
+
         matrix_data['parameters'] = {
             'grade_level': grade_level,
-            'subject_area': subject_area_id
+            'subject_area': subject_area_id,
+            'standard_ids': standard_ids
         }
         
         return view.success_response(matrix_data)
@@ -578,6 +683,7 @@ def embeddings_network_graph_api(request):
     view = EmbeddingsAPIView()
     
     try:
+        standard_ids = view.parse_standard_ids(request)
         # Validate parameters
         grade_level = request.GET.get('grade_level')
         if grade_level and grade_level.strip():
@@ -601,26 +707,39 @@ def embeddings_network_graph_api(request):
         secondary_threshold = float(request.GET.get('secondary_threshold', 0.5))
         
         # Create cache key including clustering parameters
-        cache_key = f"network_graph_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
-        
+        cache_key = None
+        if not standard_ids:
+            cache_key = f"network_graph_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
+
         def calculate_network_graph():
-            # Get standards with embeddings for analysis
-            standards_query = Standard.objects.filter(
-                embedding__isnull=False
-            ).select_related('state', 'subject_area')
-            
-            if grade_level is not None:
-                standards_query = standards_query.filter(
-                    grade_levels__grade_numeric=grade_level
-                ).distinct()
-            
-            if subject_area_id:
-                standards_query = standards_query.filter(subject_area_id=subject_area_id)
-            
-            # Use the max_standards parameter from outer scope
-            standards = list(standards_query[:max_standards])
-            
-            if len(standards) < 10:
+            if standard_ids:
+                standards_query = Standard.objects.filter(
+                    id__in=standard_ids,
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area').prefetch_related('grade_levels')
+                standards = list(standards_query)
+                order_map = {sid: index for index, sid in enumerate(standard_ids)}
+                standards.sort(key=lambda s: order_map.get(str(s.id), 0))
+            else:
+                standards_query = Standard.objects.filter(
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area')
+
+                if grade_level is not None:
+                    standards_query = standards_query.filter(
+                        grade_levels__grade_numeric=grade_level
+                    ).distinct()
+
+                if subject_area_id:
+                    standards_query = standards_query.filter(subject_area_id=subject_area_id)
+
+                standards = list(standards_query[:max_standards])
+
+            min_required = 10
+            if standard_ids:
+                min_required = 2
+
+            if len(standards) < min_required:
                 return {
                     'nodes': [],
                     'edges': [],
@@ -985,12 +1104,16 @@ def embeddings_network_graph_api(request):
                     'error': f'Network analysis failed: {str(e)}'
                 }
         
-        network_data = view.get_cached_or_calculate(cache_key, calculate_network_graph)
-        
+        if cache_key:
+            network_data = view.get_cached_or_calculate(cache_key, calculate_network_graph)
+        else:
+            network_data = calculate_network_graph()
+
         # Add parameters to response
         network_data['parameters'] = {
             'grade_level': grade_level,
-            'subject_area': subject_area_id
+            'subject_area': subject_area_id,
+            'standard_ids': standard_ids
         }
         
         return view.success_response(network_data)
@@ -2157,6 +2280,7 @@ def embeddings_cluster_matrix_api(request):
     view = EmbeddingsAPIView()
     
     try:
+        standard_ids = view.parse_standard_ids(request)
         # Validate parameters (same as visualization endpoint for consistency)
         grade_level = request.GET.get('grade_level')
         if grade_level and grade_level.strip():
@@ -2174,26 +2298,35 @@ def embeddings_cluster_matrix_api(request):
         )
         
         # Create cache key
-        cache_key = f"topic_coverage_matrix_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
-        
+        cache_key = None
+        if not standard_ids:
+            cache_key = f"topic_coverage_matrix_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
+
         def calculate_cluster_matrix():
-            # Get the same clustering data as the scatter plot
-            # This ensures consistency between visualizations
-            standards_query = Standard.objects.filter(
-                embedding__isnull=False
-            ).select_related('state', 'subject_area')
-            
-            if grade_level is not None:
-                standards_query = standards_query.filter(
-                    grade_levels__grade_numeric=grade_level
-                ).distinct()
-            
-            if subject_area_id:
-                standards_query = standards_query.filter(subject_area_id=subject_area_id)
-            
-            standards = list(standards_query[:2000])
-            
-            if len(standards) < 10:
+            if standard_ids:
+                standards_query = Standard.objects.filter(
+                    id__in=standard_ids,
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area').prefetch_related('grade_levels')
+                standards = list(standards_query)
+                order_map = {sid: idx for idx, sid in enumerate(standard_ids)}
+                standards.sort(key=lambda s: order_map.get(str(s.id), 0))
+            else:
+                standards_query = Standard.objects.filter(
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area')
+
+                if grade_level is not None:
+                    standards_query = standards_query.filter(
+                        grade_levels__grade_numeric=grade_level
+                    ).distinct()
+
+                if subject_area_id:
+                    standards_query = standards_query.filter(subject_area_id=subject_area_id)
+
+                standards = list(standards_query[:2000])
+
+            if not standards:
                 return {
                     'topic_names': [],
                     'state_codes': [],
@@ -2365,14 +2498,18 @@ def embeddings_cluster_matrix_api(request):
                     'error': f'Topic clustering failed: {str(e)}'
                 }
         
-        matrix_data = view.get_cached_or_calculate(cache_key, calculate_cluster_matrix)
-        
+        if cache_key:
+            matrix_data = view.get_cached_or_calculate(cache_key, calculate_cluster_matrix)
+        else:
+            matrix_data = calculate_cluster_matrix()
+
         # Add parameters to response
         matrix_data['parameters'] = {
             'grade_level': grade_level,
             'subject_area': subject_area_id,
             'cluster_size': cluster_size,
-            'epsilon': epsilon
+            'epsilon': epsilon,
+            'standard_ids': standard_ids
         }
         
         return view.success_response(matrix_data)
@@ -2404,23 +2541,29 @@ def embeddings_enhanced_similarity_matrix_api(request):
         matrix_type = request.GET.get('matrix_type', 'state')  # 'state', 'topic', 'density'
         
         # Create cache key
-        cache_key = f"enhanced_matrix_{matrix_type}_{grade_level}_{subject_area_id}"
-        
+        cache_key = None
+        if not standard_ids:
+            cache_key = f"enhanced_matrix_{matrix_type}_{grade_level}_{subject_area_id}"
+
         def calculate_enhanced_matrix():
             if matrix_type == 'topic':
-                return _calculate_topic_coverage_matrix(grade_level, subject_area_id)
+                return _calculate_topic_coverage_matrix(grade_level, subject_area_id, standard_ids)
             elif matrix_type == 'density':
                 return _calculate_density_matrix(grade_level, subject_area_id)
             else:  # Default to enhanced state matrix
-                return _calculate_enhanced_state_matrix(grade_level, subject_area_id)
-        
-        matrix_data = view.get_cached_or_calculate(cache_key, calculate_enhanced_matrix)
-        
+                return _calculate_enhanced_state_matrix(grade_level, subject_area_id, standard_ids)
+
+        if cache_key:
+            matrix_data = view.get_cached_or_calculate(cache_key, calculate_enhanced_matrix)
+        else:
+            matrix_data = calculate_enhanced_matrix()
+
         # Add parameters to response
         matrix_data['parameters'] = {
             'grade_level': grade_level,
             'subject_area': subject_area_id,
-            'matrix_type': matrix_type
+            'matrix_type': matrix_type,
+            'standard_ids': standard_ids
         }
         
         return view.success_response(matrix_data)
@@ -2431,9 +2574,49 @@ def embeddings_enhanced_similarity_matrix_api(request):
         return view.handle_exception(request, e)
 
 
-def _calculate_topic_coverage_matrix(grade_level: int = None, subject_area_id: int = None) -> Dict:
+def _calculate_topic_coverage_matrix(grade_level: int = None, subject_area_id: int = None, standard_ids: Optional[List[str]] = None) -> Dict:
     """Calculate topic/theme coverage across states matrix"""
-    
+    if standard_ids:
+        standards = list(Standard.objects.filter(
+            id__in=standard_ids,
+            embedding__isnull=False,
+            state__isnull=False
+        ).select_related('state'))
+
+        if grade_level is not None:
+            standards = [s for s in standards if s.grade_levels.filter(grade_numeric=grade_level).exists()]
+        if subject_area_id:
+            standards = [s for s in standards if s.subject_area_id == subject_area_id]
+
+        state_counts = {}
+        for std in standards:
+            state_counts.setdefault(std.state.code, 0)
+            state_counts[std.state.code] += 1
+
+        state_codes = sorted(state_counts.keys())
+        if not state_codes:
+            return {
+                'row_labels': [],
+                'col_labels': [],
+                'matrix': [],
+                'matrix_type': 'topic_coverage',
+                'total_themes': 0,
+                'total_states': 0,
+                'error': 'No state coverage available for the selected standards'
+            }
+
+        max_count = max(state_counts.values()) if state_counts else 1
+        matrix = [[round(state_counts.get(code, 0) / max_count if max_count else 0, 3) for code in state_codes]]
+
+        return {
+            'row_labels': ['Selected Standards'],
+            'col_labels': state_codes,
+            'matrix': matrix,
+            'matrix_type': 'topic_coverage',
+            'total_themes': 1,
+            'total_states': len(state_codes)
+        }
+
     # Get topic clusters
     themes_query = TopicCluster.objects.all()
     if subject_area_id:
@@ -2514,26 +2697,60 @@ def _calculate_density_matrix(grade_level: int = None, subject_area_id: int = No
     }
 
 
-def _calculate_enhanced_state_matrix(grade_level: int = None, subject_area_id: int = None) -> Dict:
+def _calculate_enhanced_state_matrix(grade_level: int = None, subject_area_id: int = None, standard_ids: Optional[List[str]] = None) -> Dict:
     """Calculate enhanced state similarity matrix with better data"""
     
+    if standard_ids:
+        standards = list(Standard.objects.filter(
+            id__in=standard_ids,
+            embedding__isnull=False,
+            state__isnull=False
+        ).select_related('state').prefetch_related('grade_levels'))
+
+        if grade_level is not None:
+            standards = [s for s in standards if s.grade_levels.filter(grade_numeric=grade_level).exists()]
+        if subject_area_id:
+            standards = [s for s in standards if s.subject_area_id == subject_area_id]
+
+        state_vectors = {}
+        for std in standards:
+            try:
+                vec = np.array(std.embedding, dtype=np.float32)
+            except (ValueError, TypeError):
+                continue
+            state_vectors.setdefault(std.state.code, []).append(vec)
+
+        state_codes = sorted(state_vectors.keys())
+        if len(state_codes) < 2:
+            return {
+                'row_labels': state_codes,
+                'col_labels': state_codes,
+                'matrix': [[1.0] if state_codes else []],
+                'matrix_type': 'enhanced_state',
+                'total_states': len(state_codes),
+                'error': 'At least two states required for similarity comparison'
+            }
+
+        state_centroids = {code: np.mean(np.stack(vectors), axis=0) for code, vectors in state_vectors.items() if vectors}
+        return _build_state_similarity_matrix(state_centroids)
+
     # Use embedding-based similarities instead of just correlations
     states_query = State.objects.filter(
         standards__embedding__isnull=False
     ).distinct()
-    
+
     if grade_level is not None:
         states_query = states_query.filter(
             standards__grade_levels__grade_numeric=grade_level
         )
-    
+
     if subject_area_id:
         states_query = states_query.filter(
             standards__subject_area_id=subject_area_id
         )
-    
+
     states = list(states_query.order_by('code'))
-    
+
     if len(states) < 2:
         return {
             'row_labels': [],
@@ -2541,53 +2758,87 @@ def _calculate_enhanced_state_matrix(grade_level: int = None, subject_area_id: i
             'matrix': [],
             'error': 'Need at least 2 states for similarity matrix'
         }
-    
-    # Calculate state centroids from embeddings
+
     state_centroids = {}
-    
+
     for state in states:
         standards_query = Standard.objects.filter(
             state=state,
             embedding__isnull=False
         )
-        
+
         if grade_level is not None:
             standards_query = standards_query.filter(
                 grade_levels__grade_numeric=grade_level
             ).distinct()
-        
+
         if subject_area_id:
             standards_query = standards_query.filter(subject_area_id=subject_area_id)
-        
+
         standards = list(standards_query[:500])  # Limit for performance
-        
+
         if standards:
-            # Calculate average embedding (centroid)
             embeddings = []
             for standard in standards:
                 try:
-                    if isinstance(standard.embedding, list):
-                        embeddings.append(np.array(standard.embedding, dtype=np.float32))
-                    else:
-                        embeddings.append(np.array(standard.embedding, dtype=np.float32))
-                except:
+                    embeddings.append(np.array(standard.embedding, dtype=np.float32))
+                except Exception:
                     continue
-            
+
             if embeddings:
                 centroid = np.mean(embeddings, axis=0)
                 state_centroids[state.code] = centroid
-    
-    # Calculate similarity matrix using centroids
-    state_codes = [state.code for state in states if state.code in state_centroids]
-    n_states = len(state_codes)
-    
-    if n_states < 2:
+
+    state_codes = [code for code in [state.code for state in states] if code in state_centroids]
+    if len(state_codes) < 2:
         return {
             'row_labels': [],
             'col_labels': [],
             'matrix': [],
             'error': 'Insufficient embedding data for similarity calculation'
         }
+
+    return _build_state_similarity_matrix(state_centroids)
+
+
+def _build_state_similarity_matrix(state_centroids: Dict[str, np.ndarray]) -> Dict:
+    state_codes = sorted(state_centroids.keys())
+    if len(state_codes) < 2:
+        return {
+            'row_labels': state_codes,
+            'col_labels': state_codes,
+            'matrix': [[1.0] if state_codes else []],
+            'matrix_type': 'enhanced_state',
+            'total_states': len(state_codes)
+        }
+
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    similarity_matrix = []
+    for code1 in state_codes:
+        row = []
+        vec1 = state_centroids[code1].reshape(1, -1)
+        norm1 = np.linalg.norm(vec1)
+        for code2 in state_codes:
+            if code1 == code2:
+                similarity = 1.0
+            else:
+                vec2 = state_centroids[code2].reshape(1, -1)
+                norm2 = np.linalg.norm(vec2)
+                if norm1 == 0 or norm2 == 0:
+                    similarity = 0.0
+                else:
+                    similarity = float(cosine_similarity(vec1, vec2)[0][0])
+            row.append(round(similarity, 3))
+        similarity_matrix.append(row)
+
+    return {
+        'row_labels': state_codes,
+        'col_labels': state_codes,
+        'matrix': similarity_matrix,
+        'matrix_type': 'enhanced_state',
+        'total_states': len(state_codes)
+    }
     
     similarity_matrix = []
     

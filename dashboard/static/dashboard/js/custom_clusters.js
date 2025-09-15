@@ -72,27 +72,27 @@
     }
 
     function renderClusterDetail(payload) {
-        const body = document.getElementById('cluster-detail-body');
-        const title = document.getElementById('cluster-detail-title');
-        if (!body || !title) return;
         const cluster = payload && payload.data;
         if (!cluster) {
-            title.textContent = 'Cluster not found';
-            body.innerHTML = '<div class="text-danger">Unable to load cluster details.</div>';
+            const title = document.getElementById('cluster-detail-title');
+            const placeholder = document.getElementById('cluster-placeholder');
+            const summaryEl = document.getElementById('cluster-summary');
+            const vizContainer = document.getElementById('cluster-visualizations');
+            if (title) title.textContent = 'Cluster not found';
+            if (placeholder) {
+                placeholder.classList.remove('d-none');
+                placeholder.textContent = 'Unable to load cluster details.';
+            }
+            if (summaryEl) {
+                summaryEl.classList.add('d-none');
+                summaryEl.innerHTML = '';
+            }
+            if (vizContainer) {
+                vizContainer.classList.add('d-none');
+            }
             return;
         }
-        title.textContent = cluster.name;
-        const members = (cluster.members || []).map(member => {
-            return `<li><strong>${member.code}</strong> – ${member.title || 'Untitled'} <span class="text-muted">(${member.state || 'N/A'})</span></li>`;
-        }).join('');
-        const summary = cluster.coverage_summary || {};
-        body.innerHTML = `
-            <p class="text-muted">${cluster.description || 'No description provided.'}</p>
-            <h6>Members (${cluster.standards_count})</h6>
-            <ul class="ps-3">${members || '<li>No standards yet.</li>'}</ul>
-            <h6 class="mt-3">Coverage Snapshot</h6>
-            <pre class="bg-light p-2 rounded">${JSON.stringify(summary, null, 2)}</pre>
-        `;
+        handleVisualizationPanel(cluster);
     }
 
     function renderReportList(payload) {
@@ -279,3 +279,61 @@
         }
     };
 })();
+    function handleVisualizationPanel(cluster) {
+        const title = document.getElementById('cluster-detail-title');
+        const placeholder = document.getElementById('cluster-placeholder');
+        const summaryEl = document.getElementById('cluster-summary');
+        const vizContainer = document.getElementById('cluster-visualizations');
+        if (!title || !summaryEl || !vizContainer) return;
+
+        title.textContent = cluster.name || 'Custom Cluster';
+        if (placeholder) {
+            placeholder.classList.add('d-none');
+        }
+
+        const members = (cluster.members || []).map(member => {
+            return `<li><strong>${member.code}</strong> – ${member.title || 'Untitled'} <span class="text-muted">(${member.state || 'N/A'})</span></li>`;
+        }).join('');
+        const summary = cluster.coverage_summary || {};
+
+        summaryEl.classList.remove('d-none');
+        summaryEl.innerHTML = `
+            <p class="text-muted">${cluster.description || 'No description provided.'}</p>
+            <h6>Members (${cluster.standards_count})</h6>
+            <ul class="ps-3">${members || '<li>No standards yet.</li>'}</ul>
+            <h6 class="mt-3">Coverage Snapshot</h6>
+            <pre class="bg-light p-2 rounded">${JSON.stringify(summary, null, 2)}</pre>
+        `;
+
+        const standardIds = (cluster.members || []).map(member => member.id);
+        if (!standardIds.length) {
+            vizContainer.classList.add('d-none');
+            if (placeholder) {
+                placeholder.classList.remove('d-none');
+                placeholder.textContent = 'Add standards to this cluster to see visual analytics.';
+            }
+            if (summaryEl) {
+                summaryEl.classList.add('d-none');
+                summaryEl.innerHTML = '';
+            }
+            if (window.dashboardEmbeddings) {
+                window.dashboardEmbeddings.setStandardFilter([]);
+            }
+            return;
+        }
+
+        vizContainer.classList.remove('d-none');
+
+        if (window.dashboardEmbeddings) {
+            window.dashboardEmbeddings.setStandardFilter(standardIds);
+            if (typeof window.loadVisualizationData === 'function') {
+                window.loadVisualizationData();
+            }
+            if (typeof window.loadHeatMapData === 'function') {
+                window.loadHeatMapData('topic');
+            }
+            if (typeof window.loadNetworkGraph === 'function') {
+                window.loadNetworkGraph();
+            }
+        }
+    }
