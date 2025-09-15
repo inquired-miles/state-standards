@@ -6,6 +6,7 @@ from .views import (
     # Dashboard views
     dashboard_home, coverage_dashboard, groupings_dashboard, topics_dashboard,
     proxies_dashboard, proxy_runs_dashboard, embeddings_dashboard,
+    custom_clusters_dashboard,
     
     # Proxy API views
     proxy_run_coverage_api, proxy_run_proxies_api, generate_proxies_api,
@@ -21,10 +22,14 @@ from .views import (
     embeddings_network_graph_api, embeddings_semantic_search_api,
     clear_embeddings_cache_api, embeddings_cluster_matrix_api,
     embeddings_enhanced_similarity_matrix_api,
-    
+
     # Atomization API views
     atomize_standards_api, atomize_job_status_api, generate_atom_embeddings_api,
     atom_embeddings_job_status_api, run_proxy_pipeline_api, proxy_pipeline_status_api,
+
+    # Custom cluster APIs
+    custom_clusters_api, custom_cluster_detail_api,
+    cluster_reports_api, cluster_report_detail_api,
 )
 
 app_name = 'dashboard'
@@ -40,6 +45,7 @@ urlpatterns = [
     path('proxies/', proxies_dashboard, name='proxies'),
     path('proxy-runs/', proxy_runs_dashboard, name='proxy_runs'),
     path('embeddings/', embeddings_dashboard, name='embeddings'),
+    path('custom-clusters/', custom_clusters_dashboard, name='custom_clusters'),
     
     # API endpoints
     path('api/analyze-coverage/', analyze_coverage_api, name='analyze_coverage_api'),
@@ -85,4 +91,10 @@ urlpatterns = [
     path('api/embeddings/network-graph/', embeddings_network_graph_api, name='embeddings_network_graph'),
     path('api/embeddings/semantic-search/', embeddings_semantic_search_api, name='embeddings_semantic_search'),
     path('api/embeddings/clear-cache/', clear_embeddings_cache_api, name='clear_embeddings_cache'),
+
+    # Custom cluster APIs
+    path('api/custom-clusters/', custom_clusters_api, name='custom_clusters_api'),
+    path('api/custom-clusters/<uuid:cluster_id>/', custom_cluster_detail_api, name='custom_cluster_detail_api'),
+    path('api/cluster-reports/', cluster_reports_api, name='cluster_reports_api'),
+    path('api/cluster-reports/<uuid:report_id>/', cluster_report_detail_api, name='cluster_report_detail_api'),
 ]

@@ -1,0 +1,131 @@
+{% extends "dashboard/base.html" %}
+{% load static %}
+
+{% block title %}Custom Clusters · Dashboard{% endblock %}
+
+{% block extra_css %}
+<style>
+    .custom-cluster-layout {
+        background: white;
+        border-radius: 10px;
+        padding: 1.5rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .cluster-sidebar {
+        border-right: 1px solid #dee2e6;
+    }
+    .cluster-list {
+        max-height: 450px;
+        overflow-y: auto;
+    }
+    .cluster-list .list-group-item {
+        cursor: pointer;
+    }
+    .cluster-detail {
+        min-height: 420px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="dashboard-header">
+    <div class="container">
+        <h1 class="display-5">Custom Clusters</h1>
+        <p class="lead">Build and compare semantic groupings of standards using the same embeddings analytics available elsewhere in the dashboard.</p>
+    </div>
+</div>
+
+<div class="container">
+    <div class="row g-3">
+        <div class="col-lg-4 cluster-sidebar">
+            <div class="custom-cluster-layout mb-3">
+                <h5 class="mb-2">Saved Clusters</h5>
+                <p class="text-muted small">Select an existing cluster to view details or start fresh with a semantic search.</p>
+                <div class="cluster-list list-group" id="cluster-list">
+                    <div class="text-muted small">Loading clusters…</div>
+                </div>
+                <button class="btn btn-primary w-100 mt-3" id="new-cluster-btn">
+                    <i class="fas fa-plus"></i> Create Cluster from Search
+                </button>
+            </div>
+
+            <div class="custom-cluster-layout">
+                <h6 class="mb-2">Saved Reports</h6>
+                <p class="text-muted small">Combine clusters to compare coverage across states, grades, and subjects.</p>
+                <div class="list-group" id="report-list">
+                    <div class="text-muted small">Loading reports…</div>
+                </div>
+                <button class="btn btn-outline-secondary w-100 mt-3" id="new-report-btn">
+                    <i class="fas fa-copy"></i> New Comparison Report
+                </button>
+            </div>
+        </div>
+        <div class="col-lg-8">
+            <div class="custom-cluster-layout cluster-detail" id="cluster-detail">
+                <h4 class="mb-3" id="cluster-detail-title">Select a cluster to begin</h4>
+                <div id="cluster-detail-body" class="text-muted">
+                    Use the controls on the left to load an existing cluster or start a new one from the semantic search workflow. Selected clusters will surface member standards, similarity scores, and coverage summaries here.
+                </div>
+            </div>
+
+            <div class="custom-cluster-layout mt-3" id="report-detail" hidden>
+                <h4 class="mb-3" id="report-detail-title"></h4>
+                <div id="report-detail-body"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Cluster Builder Modal -->
+<div class="modal fade" id="cluster-builder-modal" tabindex="-1" aria-labelledby="cluster-builder-label" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="cluster-builder-label">Create Custom Cluster</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label" for="cluster-title-input">Cluster Title</label>
+                    <input type="text" class="form-control" id="cluster-title-input" placeholder="e.g., Fractions Mastery Set">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="cluster-description-input">Description</label>
+                    <textarea class="form-control" id="cluster-description-input" rows="2" placeholder="Optional notes about this cluster"></textarea>
+                </div>
+                <div class="mb-3">
+                    <div class="alert alert-info small">
+                        Use semantic search to find relevant standards. Select the standards you want to include, then click <strong>Save Cluster</strong> when ready.
+                    </div>
+                </div>
+                {% include 'dashboard/partials/semantic_search.html' with title='Search Standards to Add' enable_selection=True mode='select' %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Placeholder for future report builder -->
+<div class="modal fade" id="report-builder-modal" tabindex="-1" aria-hidden="true"></div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'dashboard/js/semantic_search.js' %}"></script>
+<script src="{% static 'dashboard/js/custom_clusters.js' %}"></script>
+<script>
+    // Minimal bootstrapping; detailed logic will live in shared JS modules refactored from embeddings page
+    document.addEventListener('DOMContentLoaded', () => {
+        if (!window.dashboardCustomClusters) {
+            console.warn('Custom cluster JS bundle not yet loaded. TODO: hook up shared semantic search/visualization modules.');
+            return;
+        }
+        window.dashboardCustomClusters.init({
+            clustersEndpoint: '{% url "dashboard:custom_clusters_api" %}',
+            clusterDetailBase: '{% url "dashboard:custom_cluster_detail_api" "00000000-0000-0000-0000-000000000000" %}'.replace('00000000-0000-0000-0000-000000000000', ''),
+            reportsEndpoint: '{% url "dashboard:cluster_reports_api" %}',
+            reportDetailBase: '{% url "dashboard:cluster_report_detail_api" "00000000-0000-0000-0000-000000000000" %}'.replace('00000000-0000-0000-0000-000000000000', ''),
+            semanticSearchEndpoint: '{% url "dashboard:embeddings_semantic_search" %}',
+            csrfToken: '{{ csrf_token }}'
+        });
+    });
+</script>
+{% endblock %}

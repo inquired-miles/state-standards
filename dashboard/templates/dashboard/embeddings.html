@@ -1,4 +1,5 @@
 {% extends "dashboard/base.html" %}
+{% load static %}
 
 {% block title %}Standards Embeddings Visualization · Dashboard{% endblock %}
 
@@ -612,42 +613,7 @@
         <!-- Semantic Search Tab -->
         <div class="tab-pane fade" id="search-pane" role="tabpanel">
             <div class="visualization-container">
-                <h5 class="mb-3">Semantic Concept Search</h5>
-                <div class="row">
-                    <div class="col-md-8">
-                        <div class="input-group mb-3">
-                            <input type="text" id="search-query" class="form-control" placeholder="Enter educational concept (e.g., 'fraction operations', 'algebraic thinking')">
-                            <button class="btn btn-primary" type="button" id="search-btn">Search</button>
-                        </div>
-                    </div>
-                    <div class="col-md-4">
-                        <select id="search-limit" class="form-select">
-                            <option value="10">Top 10 Results</option>
-                            <option value="20" selected>Top 20 Results</option>
-                            <option value="50">Top 50 Results</option>
-                            <option value="100">Top 100 Results</option>
-                            <option value="500">All Results</option>
-                        </select>
-                    </div>
-                </div>
-                
-                <div id="search-results-container" class="d-none">
-                    <div class="row">
-                        <div class="col-md-8">
-                            <h6>Search Results</h6>
-                            <div id="search-results" class="search-results"></div>
-                        </div>
-                        <div class="col-md-4">
-                            <h6>State Emphasis Ranking</h6>
-                            <div id="state-emphasis" class="search-results"></div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div id="search-loading" class="text-center d-none">
-                    <div class="spinner-border text-primary" role="status"></div>
-                    <p class="mt-2">Searching...</p>
-                </div>
+                {% include 'dashboard/partials/semantic_search.html' with title='Semantic Concept Search' enable_selection=False mode='view' %}
             </div>
         </div>
     </div>
@@ -854,6 +820,7 @@
 {% endblock %}
 
 {% block extra_js %}
+<script src="{% static 'dashboard/js/semantic_search.js' %}"></script>
 <script>
 (function() {
     // Global variables
@@ -3766,175 +3733,6 @@
         statsElement.innerHTML = `📊 Common: ${commonCount} • Semi-Common: ${semiCommonCount} • State-Specific: ${stateSpecificCount} • Standards: ${standardCount} • Edges: ${edgeCount}`;
     }
     
-    async function performSemanticSearch() {
-        const query = document.getElementById('search-query').value.trim();
-        if (!query) return;
-        
-        const payload = {
-            query: query,
-            ...getFormData(),
-            limit: parseInt(document.getElementById('search-limit').value)
-        };
-        
-        showLoading('search-loading');
-        document.getElementById('search-results-container').classList.add('d-none');
-        
-        try {
-            const response = await fetch(`{% url 'dashboard:embeddings_semantic_search' %}`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRFToken': getCookie('csrftoken')
-                },
-                body: JSON.stringify(payload)
-            });
-            
-            const response_data = await response.json();
-            
-            if (response.ok) {
-                // Handle nested data structure from APIResponseMixin
-                const data = response_data.data || response_data;
-                renderSearchResults(data);
-                document.getElementById('search-results-container').classList.remove('d-none');
-            } else {
-                console.error('Search error:', response_data.error);
-            }
-        } catch (error) {
-            console.error('Search error:', error);
-        } finally {
-            hideLoading('search-loading');
-        }
-    }
-    
-    function renderSearchResults(data) {
-        // Render search results
-        const resultsContainer = document.getElementById('search-results');
-        resultsContainer.innerHTML = '';
-        
-        data.results.slice(0, 10).forEach(result => {
-            const div = document.createElement('div');
-            div.className = 'search-result-item';
-            div.innerHTML = `
-                <div class="d-flex justify-content-between align-items-start">
-                    <div>
-                        <strong>${result.title}</strong>
-                        <span class="alignment-label ms-2 badge ${getAlignmentClass(result.alignment_category)}">${result.alignment_label}</span>
-                        <p class="mb-1 mt-1 text-muted small">${result.description || ''}</p>
-                        <small><strong>${result.state}</strong> • ${result.code}</small>
-                    </div>
-                </div>
-            `;
-            resultsContainer.appendChild(div);
-        });
-        
-        // Render state emphasis
-        const emphasisContainer = document.getElementById('state-emphasis');
-        emphasisContainer.innerHTML = '';
-        
-        Object.entries(data.state_emphasis).slice(0, 10).forEach(([state, stateData]) => {
-            const div = document.createElement('div');
-            div.className = 'state-emphasis-item clickable';
-            div.style.cursor = 'pointer';
-            div.innerHTML = `
-                <div>
-                    <strong>${state}</strong>
-                    <br><small>${stateData.count} matches</small>
-                </div>
-            `;
-            
-            // Add click handler to filter by state
-            div.addEventListener('click', () => {
-                filterResultsByState(state, data.results);
-            });
-            
-            emphasisContainer.appendChild(div);
-        });
-    }
-    
-    // Function to get alignment badge class based on category
-    function getAlignmentClass(category) {
-        switch(category) {
-            case 'aligned':
-                return 'bg-success';  // Green for aligned (35%+)
-            case 'could_align':
-                return 'bg-warning';  // Orange/Yellow for could align (30-34%)
-            case 'stretch':
-                return 'bg-info';     // Blue for stretch (25-29%)
-            case 'not_aligned':
-                return 'bg-secondary'; // Gray for not aligned (<25%)
-            default:
-                return 'bg-secondary';
-        }
-    }
-    
-    // Function to filter results by state
-    function filterResultsByState(selectedState, allResults) {
-        const filteredResults = allResults.filter(result => result.state === selectedState);
-        
-        // Update the results display
-        const resultsContainer = document.getElementById('search-results');
-        resultsContainer.innerHTML = '';
-        
-        if (filteredResults.length === 0) {
-            resultsContainer.innerHTML = '<p class="text-muted">No results found for this state.</p>';
-            return;
-        }
-        
-        // Add filter indicator
-        const filterIndicator = document.createElement('div');
-        filterIndicator.className = 'alert alert-info d-flex justify-content-between align-items-center';
-        filterIndicator.innerHTML = `
-            <span><strong>Filtered by:</strong> ${selectedState} (${filteredResults.length} results)</span>
-            <button class="btn btn-sm btn-outline-secondary" onclick="clearStateFilter()">Clear Filter</button>
-        `;
-        resultsContainer.appendChild(filterIndicator);
-        
-        // Display filtered results
-        filteredResults.forEach(result => {
-            const div = document.createElement('div');
-            div.className = 'search-result-item';
-            div.innerHTML = `
-                <div class="d-flex justify-content-between align-items-start">
-                    <div>
-                        <strong>${result.title}</strong>
-                        <span class="alignment-label ms-2 badge ${getAlignmentClass(result.alignment_category)}">${result.alignment_label}</span>
-                        <p class="mb-1 mt-1 text-muted small">${result.description || ''}</p>
-                        <small><strong>${result.state}</strong> • ${result.code}</small>
-                    </div>
-                </div>
-            `;
-            resultsContainer.appendChild(div);
-        });
-        
-        // Store original results for clearing filter
-        window.originalSearchResults = allResults;
-    }
-    
-    // Function to clear state filter
-    function clearStateFilter() {
-        if (window.originalSearchResults) {
-            const resultsContainer = document.getElementById('search-results');
-            resultsContainer.innerHTML = '';
-            
-            // Restore original results
-            window.originalSearchResults.slice(0, 10).forEach(result => {
-                const div = document.createElement('div');
-                div.className = 'search-result-item';
-                div.innerHTML = `
-                    <div class="d-flex justify-content-between align-items-start">
-                        <div>
-                            <strong>${result.title}</strong>
-                            <span class="alignment-label ms-2 badge ${getAlignmentClass(result.alignment_category)}">${result.alignment_label}</span>
-                            <p class="mb-1 mt-1 text-muted small">${result.description || ''}</p>
-                            <small><strong>${result.state}</strong> • ${result.code}</small>
-                        </div>
-                    </div>
-                `;
-                resultsContainer.appendChild(div);
-            });
-        }
-    }
-    
     // Event listeners
     document.getElementById('update-viz').addEventListener('click', function() {
         console.log('Update button clicked');
@@ -3973,14 +3771,24 @@
         }
     });
     
-    document.getElementById('search-btn').addEventListener('click', performSemanticSearch);
-    
-    document.getElementById('search-query').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-            performSemanticSearch();
-        }
-    });
-    
+    // Initialize shared semantic search module
+    const searchRoot = document.querySelector('#search-pane [data-semantic-search]');
+    if (searchRoot && window.dashboardSemanticSearch) {
+        window.dashboardSemanticSearch.init({
+            root: searchRoot,
+            searchUrl: '{% url 'dashboard:embeddings_semantic_search' %}',
+            csrfToken: getCookie('csrftoken'),
+            getFilters: () => {
+                const formData = getFormData();
+                return {
+                    grade_level: formData.grade_level,
+                    subject_area: formData.subject_area
+                };
+            },
+            mode: 'view'
+        });
+    }
+
     // Heat map control event listeners
     document.getElementById('heatmap-type').addEventListener('change', function() {
         const heatmapType = this.value;

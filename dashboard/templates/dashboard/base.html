@@ -149,6 +149,12 @@
                             </a>
                         </li>
                         <li class="nav-item mb-2">
+                            <a class="nav-link {% if request.resolver_match.url_name == 'custom_clusters' %}active{% endif %}"
+                               href="{% url 'dashboard:custom_clusters' %}">
+                                🧺 Custom Clusters
+                            </a>
+                        </li>
+                        <li class="nav-item mb-2">
                             <a class="nav-link {% if request.resolver_match.url_name == 'embeddings' %}active{% endif %}"
                                href="{% url 'dashboard:embeddings' %}">
                                 🔬 Embeddings Viz

@@ -8,6 +8,7 @@ from .dashboard_views import (
     topics_dashboard,
     proxies_dashboard,
     embeddings_dashboard,
+    custom_clusters_dashboard,
     proxy_runs_dashboard
 )
 
@@ -41,6 +42,13 @@ from .embeddings_api_views import (
     clear_embeddings_cache_api
 )
 
+from .custom_cluster_api_views import (
+    custom_clusters_api,
+    custom_cluster_detail_api,
+    cluster_reports_api,
+    cluster_report_detail_api,
+)
+
 from .atomization_api_views import (
     atomize_standards_api,
     atomize_job_status_api,
@@ -58,6 +66,7 @@ __all__ = [
     'topics_dashboard',
     'proxies_dashboard',
     'embeddings_dashboard',
+    'custom_clusters_dashboard',
     'proxy_runs_dashboard',
     
     # Proxy API views
@@ -77,7 +86,7 @@ __all__ = [
     'run_topic_analysis_api',
     'topic_analysis_status_api',
     'analyze_coverage_api',
-    
+
     # Embeddings API views
     'embeddings_visualization_data_api',
     'embeddings_similarity_matrix_api',
@@ -86,7 +95,13 @@ __all__ = [
     'embeddings_network_graph_api',
     'embeddings_semantic_search_api',
     'clear_embeddings_cache_api',
-    
+
+    # Custom cluster APIs
+    'custom_clusters_api',
+    'custom_cluster_detail_api',
+    'cluster_reports_api',
+    'cluster_report_detail_api',
+
     # Atomization API views
     'atomize_standards_api',
     'atomize_job_status_api',

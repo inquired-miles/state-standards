@@ -60,6 +60,7 @@ db.sqlite3-journal
 # Django collected/static/media outputs
 staticfiles/
 static/
+!dashboard/static/
 media/
 assets/
 
