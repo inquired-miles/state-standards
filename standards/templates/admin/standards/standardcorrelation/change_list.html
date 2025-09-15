@@ -1,0 +1,138 @@
+{% extends "admin/change_list.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block object-tools-items %}
+    {{ block.super }}
+    <li>
+        <a href="{{ generate_correlations_url }}" class="addlink">
+            Generate Correlations
+        </a>
+    </li>
+    <li>
+        <a href="{{ correlation_analysis_url }}" class="viewlink">
+            Threshold Analysis
+        </a>
+    </li>
+{% endblock %}
+
+{% block extrahead %}
+    {{ block.super }}
+    <style>
+        .correlation-stats {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin: 10px 0;
+        }
+        .stat-item {
+            text-align: center;
+            padding: 10px;
+            background: white;
+            border-radius: 3px;
+            border: 1px solid #ddd;
+        }
+        .stat-number {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #0066cc;
+            margin-bottom: 5px;
+        }
+        .stat-label {
+            font-size: 0.8em;
+            color: #666;
+        }
+        .quick-actions {
+            background: #e8f4f8;
+            border: 1px solid #bee5eb;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        .action-button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            text-decoration: none;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .btn-primary {
+            background: #0066cc;
+            color: white;
+        }
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+        .btn-info {
+            background: #17a2b8;
+            color: white;
+        }
+    </style>
+{% endblock %}
+
+{% block content_title %}
+    {{ block.super }}
+    
+    <div class="correlation-stats">
+        <h3>Correlation Statistics</h3>
+        <div class="stats-grid">
+            <div class="stat-item">
+                <div class="stat-number">{{ cl.result_count }}</div>
+                <div class="stat-label">Total Correlations</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number">
+                    {{ cl.queryset|length|add:"-1"|default:"0" }}
+                </div>
+                <div class="stat-label">Verified</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-number">
+                    {% if cl.result_count > 0 %}
+                        {% with cl.queryset|first as first_correlation %}
+                            {% if first_correlation.similarity_score %}
+                                {{ first_correlation.similarity_score|floatformat:3 }}
+                            {% else %}
+                                N/A
+                            {% endif %}
+                        {% endwith %}
+                    {% else %}
+                        N/A
+                    {% endif %}
+                </div>
+                <div class="stat-label">First Similarity</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="quick-actions">
+        <h3>Quick Actions</h3>
+        <div class="action-buttons">
+            <a href="{{ generate_correlations_url }}" class="action-button btn-primary">
+                🔄 Generate New Correlations
+            </a>
+            <a href="{{ correlation_analysis_url }}" class="action-button btn-info">
+                📊 Analyze Thresholds
+            </a>
+            <a href="{% url 'admin:standards_correlationjob_changelist' %}" class="action-button btn-secondary">
+                📋 View Generation Jobs
+            </a>
+        </div>
+        <p style="margin: 10px 0 0 0; font-size: 0.9em; color: #666;">
+            Use the correlation generator to create new cross-state standard alignments based on similarity thresholds.
+        </p>
+    </div>
+{% endblock %}

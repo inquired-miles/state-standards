@@ -1,0 +1,251 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block title %}Preview Upload - {{ upload_job.original_filename }}{% endblock %}
+
+{% block extrahead %}
+<link rel="stylesheet" href="{% static 'admin/css/forms.css' %}">
+<style>
+    .preview-container {
+        max-width: 1000px;
+        margin: 0 auto;
+    }
+    .file-info {
+        background-color: #f8f9fa;
+        padding: 20px;
+        border-radius: 5px;
+        margin: 20px 0;
+    }
+    .preview-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 20px 0;
+        background-color: white;
+        border: 1px solid #ddd;
+    }
+    .preview-table th,
+    .preview-table td {
+        padding: 10px;
+        border: 1px solid #ddd;
+        text-align: left;
+        font-size: 12px;
+    }
+    .preview-table th {
+        background-color: #f1f1f1;
+        font-weight: bold;
+    }
+    .preview-table td {
+        max-width: 200px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .settings-summary {
+        background-color: #e9ecef;
+        padding: 15px;
+        border-radius: 5px;
+        margin: 20px 0;
+    }
+    .warning-box {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 5px;
+        padding: 15px;
+        margin: 15px 0;
+    }
+    .error-box {
+        background-color: #f8d7da;
+        border: 1px solid #f5c6cb;
+        border-radius: 5px;
+        padding: 15px;
+        margin: 15px 0;
+        color: #721c24;
+    }
+    .confirm-section {
+        background-color: white;
+        padding: 20px;
+        border: 2px solid #007cba;
+        border-radius: 5px;
+        margin: 20px 0;
+    }
+    .btn-group {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+        margin-top: 20px;
+    }
+    .btn {
+        padding: 10px 20px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        text-decoration: none;
+        display: inline-block;
+        text-align: center;
+    }
+    .btn-primary {
+        background-color: #007cba;
+        color: white;
+    }
+    .btn-secondary {
+        background-color: #6c757d;
+        color: white;
+    }
+    .btn-danger {
+        background-color: #dc3545;
+        color: white;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="preview-container">
+    <h1>Preview Upload: {{ upload_job.original_filename }}</h1>
+    
+    <div class="file-info">
+        <h3>File Information</h3>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            <div>
+                <p><strong>Filename:</strong> {{ upload_job.original_filename }}</p>
+                <p><strong>File Size:</strong> {{ upload_job.file_size|filesizeformat }}</p>
+                <p><strong>File Type:</strong> {{ upload_job.get_file_type_display }}</p>
+            </div>
+            <div>
+                <p><strong>Estimated Records:</strong> {{ preview_data.total_estimated }}</p>
+                <p><strong>Upload Time:</strong> {{ upload_job.created_at|date:"M d, Y H:i:s" }}</p>
+                <p><strong>Uploaded By:</strong> {{ upload_job.uploaded_by }}</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="settings-summary">
+        <h3>Upload Settings</h3>
+        <ul>
+            <li><strong>Clear Existing Standards:</strong> 
+                {% if upload_job.clear_existing %}
+                    <span style="color: #dc3545;">Yes - All existing standards will be deleted</span>
+                {% else %}
+                    No - Existing standards will be preserved
+                {% endif %}
+            </li>
+            <li><strong>Generate Embeddings:</strong> 
+                {% if upload_job.generate_embeddings %}
+                    Yes - OpenAI embeddings will be generated after import
+                {% else %}
+                    No - Standards will be imported without embeddings
+                {% endif %}
+            </li>
+            <li><strong>Batch Size:</strong> {{ upload_job.batch_size }} records per batch</li>
+        </ul>
+    </div>
+    
+    {% if upload_job.clear_existing %}
+    <div class="warning-box">
+        <h4>⚠️ Warning: Destructive Operation</h4>
+        <p>This upload will <strong>permanently delete all existing standards</strong> before importing new ones. 
+        Please ensure you have a backup if needed.</p>
+    </div>
+    {% endif %}
+    
+    {% if preview_data.error %}
+    <div class="error-box">
+        <h4>❌ File Processing Error</h4>
+        <p>{{ preview_data.error }}</p>
+        <p>Please check your file format and try again.</p>
+    </div>
+    {% else %}
+    <div class="preview-section">
+        <h3>Data Preview (First 5 Records)</h3>
+        {% if preview_data.records %}
+        <div style="overflow-x: auto;">
+            <table class="preview-table">
+                <thead>
+                    <tr>
+                        {% for key in preview_data.records.0.keys %}
+                        <th>{{ key|title }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for record in preview_data.records %}
+                    <tr>
+                        {% for value in record.values %}
+                        <td title="{{ value }}">{{ value|truncatechars:50 }}</td>
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        
+        {% if preview_data.total_estimated > 5 %}
+        <p style="color: #666; font-style: italic;">
+            ... and {{ preview_data.total_estimated|add:"-5" }} more records
+        </p>
+        {% endif %}
+        {% else %}
+        <p>No records found in the file.</p>
+        {% endif %}
+    </div>
+    
+    <div class="confirm-section">
+        <h3>Confirm Upload</h3>
+        <p>Please review the information above and confirm that you want to proceed with this upload.</p>
+        
+        <form method="post" action="{% url 'admin_confirm_upload' %}">
+            {% csrf_token %}
+            {{ form.as_p }}
+            
+            <div class="form-row">
+                {{ form.confirm_upload }}
+                <label for="{{ form.confirm_upload.id_for_label }}">
+                    <strong>I have reviewed the data preview and settings above, and I confirm that I want to proceed with this upload.</strong>
+                </label>
+            </div>
+            
+            <div class="btn-group">
+                <a href="{% url 'admin_bulk_upload' %}" class="btn btn-secondary">Cancel</a>
+                {% if upload_job.clear_existing %}
+                <input type="submit" value="Delete All & Import" class="btn btn-danger">
+                {% else %}
+                <input type="submit" value="Start Import" class="btn btn-primary">
+                {% endif %}
+            </div>
+        </form>
+    </div>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.querySelector('form[action="{% url 'admin_confirm_upload' %}"]');
+    const submitBtn = form.querySelector('input[type="submit"]');
+    
+    form.addEventListener('submit', function(e) {
+        const confirmCheckbox = document.getElementById('{{ form.confirm_upload.id_for_label }}');
+        
+        if (!confirmCheckbox.checked) {
+            e.preventDefault();
+            alert('Please confirm that you want to proceed with the upload.');
+            return;
+        }
+        
+        {% if upload_job.clear_existing %}
+        if (!confirm('This will DELETE ALL existing standards. Are you absolutely sure you want to continue?')) {
+            e.preventDefault();
+            return;
+        }
+        {% endif %}
+        
+        submitBtn.disabled = true;
+        submitBtn.value = 'Starting Import...';
+    });
+    
+    // Update form action URL
+    form.addEventListener('submit', function(e) {
+        const action = "{% url 'admin_confirm_upload' %}";
+        this.action = action;
+    });
+});
+</script>
+{% endblock %}

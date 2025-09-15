@@ -1,0 +1,39 @@
+{% extends "admin/change_list.html" %}
+{% load static %}
+
+{% block object-tools-items %}
+    {{ block.super }}
+    <li>
+        <a href="{% url 'admin_bulk_upload' %}" class="addlink" style="background: #417690; color: white; padding: 10px 15px; border-radius: 4px; text-decoration: none; margin-left: 10px;">
+            📁 Bulk Upload Standards
+        </a>
+    </li>
+    <li>
+        <a href="{% url 'admin_generate_template' %}" class="addlink" style="background: #28a745; color: white; padding: 10px 15px; border-radius: 4px; text-decoration: none; margin-left: 10px;">
+            📄 Download Template
+        </a>
+    </li>
+{% endblock %}
+
+{% block content %}
+    {% if cl.result_count == 0 and not cl.has_filters %}
+    <div style="background: #e3f2fd; border: 1px solid #2196f3; border-radius: 4px; padding: 20px; margin: 20px 0; text-align: center;">
+        <h3 style="color: #1976d2; margin-top: 0;">No Standards Found</h3>
+        <p>Get started by uploading your standards data:</p>
+        <div style="margin-top: 15px;">
+            <a href="{% url 'admin_bulk_upload' %}" class="button" style="background: #417690; color: white; padding: 12px 20px; border-radius: 4px; text-decoration: none; margin: 5px;">
+                📁 Bulk Upload Standards
+            </a>
+            <a href="{% url 'admin_generate_template' %}" class="button" style="background: #28a745; color: white; padding: 12px 20px; border-radius: 4px; text-decoration: none; margin: 5px;">
+                📄 Download Template
+            </a>
+        </div>
+        <p style="margin-top: 15px; color: #666; font-size: 14px;">
+            Upload CSV or JSON files containing educational standards from all 50 states.<br>
+            Download a template to see the correct format.
+        </p>
+    </div>
+    {% endif %}
+    
+    {{ block.super }}
+{% endblock %}

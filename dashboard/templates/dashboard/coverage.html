@@ -1,0 +1,373 @@
+{% extends 'dashboard/base.html' %}
+
+{% block title %}Coverage Map Dashboard{% endblock %}
+
+{% block content %}
+<div class="dashboard-header">
+    <div class="container">
+        <h1>{{ title }}</h1>
+        <p class="lead">{{ subtitle }}</p>
+    </div>
+</div>
+
+<div class="container">
+    <!-- Curriculum Input Section -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">📝 Analyze Your Curriculum</h5>
+                </div>
+                <div class="card-body">
+                    <form id="curriculumForm">
+                        <div class="row">
+                            <div class="col-md-8">
+                                <div class="mb-3">
+                                    <label for="curriculumTitle" class="form-label">Curriculum Title</label>
+                                    <input type="text" class="form-control" id="curriculumTitle" 
+                                           placeholder="e.g., 3rd Grade Social Studies Unit 1" value="3rd Grade Social Studies Unit 1">
+                                </div>
+                                <div class="mb-3">
+                                    <label for="curriculumContent" class="form-label">Curriculum Content</label>
+                                    <textarea class="form-control" id="curriculumContent" rows="6" 
+                                              placeholder="Paste your curriculum content here...">Students will learn about maps, geography, local government, community helpers, and basic civics including democracy and voting.</textarea>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="mb-3">
+                                    <label for="subjectArea" class="form-label">Subject Area</label>
+                                    <select class="form-select" id="subjectArea">
+                                        <option value="">All Subjects</option>
+                                        {% for subject in subject_areas %}
+                                        <option value="{{ subject.id }}" {% if subject.name == "Social Studies" %}selected{% endif %}>{{ subject.name }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="gradeLevel" class="form-label">Grade Level</label>
+                                    <select class="form-select" id="gradeLevel">
+                                        <option value="">All Grades</option>
+                                        {% for grade in grade_levels %}
+                                        <option value="{{ grade.id }}" {% if grade.grade == "3" %}selected{% endif %}>Grade {{ grade.grade }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <button type="submit" class="btn btn-primary w-100">
+                                    <span id="analyzeSpinner" class="spinner-border spinner-border-sm me-2" style="display: none;"></span>
+                                    🔍 Analyze Coverage
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results Section -->
+    <div id="resultsSection" style="display: none;">
+        <!-- Coverage Overview -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">🗺️ State Coverage Analysis</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row text-center mb-4">
+                            <div class="col-md-3">
+                                <div class="metric-number text-success" id="fullyCovered">42</div>
+                                <p class="mb-0">Fully Covered</p>
+                                <small class="text-muted">84%</small>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="metric-number text-warning" id="partiallyCovered">6</div>
+                                <p class="mb-0">Partially Covered</p>
+                                <small class="text-muted">12%</small>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="metric-number text-danger" id="notCovered">2</div>
+                                <p class="mb-0">Not Covered</p>
+                                <small class="text-muted">4%</small>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="metric-number text-primary" id="totalStates">50</div>
+                                <p class="mb-0">Total States</p>
+                                <small class="text-muted">100%</small>
+                            </div>
+                        </div>
+
+                        <!-- Coverage Progress Bar -->
+                        <div class="mb-3">
+                            <div class="d-flex justify-content-between mb-1">
+                                <span>Overall Coverage</span>
+                                <span id="coveragePercentage">84%</span>
+                            </div>
+                            <div class="coverage-bar">
+                                <div class="coverage-fill" id="coverageBar" style="width: 84%;"></div>
+                            </div>
+                        </div>
+
+                        <!-- Visual State Grid -->
+                        <div class="mt-4">
+                            <h6>State Coverage Visualization</h6>
+                            <div id="stateGrid" class="d-flex flex-wrap">
+                                <!-- States will be populated dynamically -->
+                            </div>
+                            <div class="mt-2">
+                                <small class="me-3"><span class="badge bg-success">■</span> Fully Covered</small>
+                                <small class="me-3"><span class="badge bg-warning">■</span> Partially Covered</small>
+                                <small><span class="badge bg-danger">■</span> Not Covered</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Quick Wins Section -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">🎯 Quick Wins (High Impact, Low Effort)</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="quickWinsList">
+                            <!-- Quick wins will be populated dynamically -->
+                            <div class="quick-win-item">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <strong>Add "postal workers"</strong>
+                                        <p class="mb-0 text-muted">Unlock 3 more states (30 min work)</p>
+                                    </div>
+                                    <span class="badge bg-success">+3 states</span>
+                                </div>
+                            </div>
+                            <div class="quick-win-item">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <strong>Add "tribal leaders"</strong>
+                                        <p class="mb-0 text-muted">Unlock 2 more states (45 min work)</p>
+                                    </div>
+                                    <span class="badge bg-success">+2 states</span>
+                                </div>
+                            </div>
+                            <div class="quick-win-item">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div>
+                                        <strong>Add "compass rose"</strong>
+                                        <p class="mb-0 text-muted">Complete 4 partial states (20 min work)</p>
+                                    </div>
+                                    <span class="badge bg-info">+4 upgrades</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Concepts Analyzed -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">🔍 Concepts Analyzed</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="conceptsList">
+                            <!-- Concepts will be populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Error Section -->
+    <div id="errorSection" class="alert alert-danger" style="display: none;">
+        <h6>Analysis Error</h6>
+        <p id="errorMessage">An error occurred while analyzing your curriculum.</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// US State codes for visualization
+const US_STATES = [
+    'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+    'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+    'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+    'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+    'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY'
+];
+
+document.getElementById('curriculumForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    analyzeCoverage();
+});
+
+function analyzeCoverage() {
+    const content = document.getElementById('curriculumContent').value;
+    const subjectArea = document.getElementById('subjectArea').value;
+    const spinner = document.getElementById('analyzeSpinner');
+    const resultsSection = document.getElementById('resultsSection');
+    const errorSection = document.getElementById('errorSection');
+    
+    // Show spinner
+    spinner.style.display = 'inline-block';
+    resultsSection.style.display = 'none';
+    errorSection.style.display = 'none';
+    
+    // Make API call
+    fetch('{% url "dashboard:analyze_coverage_api" %}', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': getCookie('csrftoken')
+        },
+        body: JSON.stringify({
+            content: content,
+            subject_area: subjectArea
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        spinner.style.display = 'none';
+        
+        if (data.error) {
+            showError(data.error);
+        } else {
+            showResults(data);
+        }
+    })
+    .catch(error => {
+        spinner.style.display = 'none';
+        showError('Network error: ' + error.message);
+    });
+}
+
+function showResults(data) {
+    const resultsSection = document.getElementById('resultsSection');
+    
+    // Update metrics
+    document.getElementById('fullyCovered').textContent = data.fully_covered || 0;
+    document.getElementById('partiallyCovered').textContent = data.partially_covered || 0;
+    document.getElementById('notCovered').textContent = data.not_covered || 0;
+    document.getElementById('totalStates').textContent = data.total_states || 50;
+    
+    const percentage = Math.round(data.coverage_percentage || 0);
+    document.getElementById('coveragePercentage').textContent = percentage + '%';
+    document.getElementById('coverageBar').style.width = percentage + '%';
+    
+    // Update state grid
+    updateStateGrid(data);
+    
+    // Update quick wins
+    updateQuickWins(data.quick_wins || []);
+    
+    // Update concepts
+    updateConcepts(data.concepts_analyzed || []);
+    
+    resultsSection.style.display = 'block';
+}
+
+function updateStateGrid(data) {
+    const stateGrid = document.getElementById('stateGrid');
+    stateGrid.innerHTML = '';
+    
+    const fullyCovered = data.fully_covered || 0;
+    const partiallyCovered = data.partially_covered || 0;
+    
+    US_STATES.forEach((state, index) => {
+        const stateElement = document.createElement('span');
+        stateElement.className = 'badge me-1 mb-1';
+        stateElement.textContent = state;
+        stateElement.title = state;
+        
+        if (index < fullyCovered) {
+            stateElement.classList.add('bg-success');
+        } else if (index < fullyCovered + partiallyCovered) {
+            stateElement.classList.add('bg-warning');
+        } else {
+            stateElement.classList.add('bg-danger');
+        }
+        
+        stateGrid.appendChild(stateElement);
+    });
+}
+
+function updateQuickWins(quickWins) {
+    const quickWinsList = document.getElementById('quickWinsList');
+    
+    if (quickWins.length === 0) {
+        quickWinsList.innerHTML = '<p class="text-muted">No quick wins identified. Your content already has good coverage!</p>';
+        return;
+    }
+    
+    quickWinsList.innerHTML = '';
+    quickWins.forEach(win => {
+        const winElement = document.createElement('div');
+        winElement.className = 'quick-win-item';
+        winElement.innerHTML = `
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <strong>Add "${win.concept}"</strong>
+                    <p class="mb-0 text-muted">${win.description}</p>
+                </div>
+                <span class="badge bg-success">+${win.impact} states</span>
+            </div>
+        `;
+        quickWinsList.appendChild(winElement);
+    });
+}
+
+function updateConcepts(concepts) {
+    const conceptsList = document.getElementById('conceptsList');
+    
+    if (concepts.length === 0) {
+        conceptsList.innerHTML = '<p class="text-muted">No educational concepts detected.</p>';
+        return;
+    }
+    
+    conceptsList.innerHTML = '';
+    concepts.forEach(concept => {
+        const conceptBadge = document.createElement('span');
+        conceptBadge.className = 'badge bg-primary me-2 mb-2';
+        conceptBadge.textContent = concept;
+        conceptsList.appendChild(conceptBadge);
+    });
+}
+
+function showError(message) {
+    const errorSection = document.getElementById('errorSection');
+    document.getElementById('errorMessage').textContent = message;
+    errorSection.style.display = 'block';
+}
+
+function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+        const cookies = document.cookie.split(';');
+        for (let i = 0; i < cookies.length; i++) {
+            const cookie = cookies[i].trim();
+            if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                break;
+            }
+        }
+    }
+    return cookieValue;
+}
+
+// Auto-analyze on page load with sample data
+document.addEventListener('DOMContentLoaded', function() {
+    // Trigger analysis with sample data after 1 second
+    setTimeout(() => {
+        analyzeCoverage();
+    }, 1000);
+});
+</script>
+{% endblock %}

@@ -1,0 +1,365 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls static admin_modify %}
+
+{% block title %}Generate Correlations{% endblock %}
+
+{% block extrastyle %}
+    {{ block.super }}
+    <style>
+        .threshold-slider-container {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .slider-display {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #333;
+            margin: 10px 0;
+        }
+        .threshold-info {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 5px;
+        }
+        .preview-section {
+            background: #e8f4f8;
+            border: 1px solid #bee5eb;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            text-align: center;
+        }
+        .stat-number {
+            font-size: 2em;
+            font-weight: bold;
+            color: #0066cc;
+        }
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 5px;
+        }
+        .warning-box {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 5px;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        .success-box {
+            background: #d1edcc;
+            border: 1px solid #c3e6cb;
+            border-radius: 5px;
+            padding: 10px;
+            margin: 10px 0;
+        }
+        .recent-jobs {
+            margin-top: 30px;
+        }
+        .job-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .job-status {
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+        .status-pending { background: #ffeaa7; color: #d68910; }
+        .status-analyzing { background: #a8dadc; color: #1d3557; }
+        .status-generating { background: #f1c40f; color: #8e44ad; }
+        .status-completed { background: #d1edcc; color: #27ae60; }
+        .status-failed { background: #fadbd8; color: #e74c3c; }
+        .status-cancelled { background: #d5d5d5; color: #7f8c8d; }
+    </style>
+{% endblock %}
+
+{% block extrahead %}
+    {{ block.super }}
+    <script>
+        function updateThresholdDisplay() {
+            const slider = document.getElementById('id_similarity_threshold');
+            const display = document.getElementById('threshold-display');
+            const info = document.getElementById('threshold-info');
+            
+            if (slider && display) {
+                const value = parseFloat(slider.value);
+                display.textContent = value.toFixed(2);
+                
+                // Update threshold description
+                let description = '';
+                let quality = '';
+                
+                if (value >= 0.95) {
+                    description = 'Exact matches - Nearly identical standards';
+                    quality = 'high';
+                } else if (value >= 0.85) {
+                    description = 'Very similar - Strong alignment with minor differences';
+                    quality = 'high';
+                } else if (value >= 0.75) {
+                    description = 'Similar - Good alignment with some differences';
+                    quality = 'medium';
+                } else if (value >= 0.65) {
+                    description = 'Related - Moderate alignment, related concepts';
+                    quality = 'medium';
+                } else if (value >= 0.50) {
+                    description = 'Loosely related - Some conceptual overlap';
+                    quality = 'low';
+                } else {
+                    description = 'Weak correlation - Minimal alignment';
+                    quality = 'low';
+                }
+                
+                if (info) {
+                    info.textContent = description;
+                    info.className = 'threshold-info quality-' + quality;
+                }
+                
+                // Update preview
+                updatePreview();
+            }
+        }
+        
+        function updatePreview() {
+            const threshold = document.getElementById('id_similarity_threshold').value;
+            const subjectId = document.getElementById('id_subject_area_filter').value;
+            const stateFilter = Array.from(document.getElementById('id_state_filter').selectedOptions).map(o => o.value);
+            
+            // Show loading
+            const previewSection = document.getElementById('preview-section');
+            if (previewSection) {
+                previewSection.innerHTML = '<p>Loading preview...</p>';
+            }
+            
+            const params = new URLSearchParams({
+                threshold: threshold
+            });
+            
+            if (subjectId) {
+                params.append('subject_id', subjectId);
+            }
+            
+            stateFilter.forEach(stateId => {
+                params.append('state_ids', stateId);
+            });
+            
+            fetch(`{% url 'admin_correlation_preview_api' %}?${params}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        previewSection.innerHTML = `<p class="error">Error: ${data.error}</p>`;
+                    } else {
+                        updatePreviewDisplay(data);
+                    }
+                })
+                .catch(error => {
+                    previewSection.innerHTML = `<p class="error">Error loading preview: ${error}</p>`;
+                });
+        }
+        
+        function updatePreviewDisplay(data) {
+            const previewSection = document.getElementById('preview-section');
+            
+            const html = `
+                <h3>Generation Preview</h3>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-number">${data.standards_count}</div>
+                        <div class="stat-label">Standards to Process</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${data.estimated_correlations}</div>
+                        <div class="stat-label">Estimated Correlations</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${Math.ceil(data.estimated_processing_time_minutes)}</div>
+                        <div class="stat-label">Estimated Time (minutes)</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${data.threshold_info.quality.toUpperCase()}</div>
+                        <div class="stat-label">Quality Level</div>
+                    </div>
+                </div>
+                <div class="threshold-info">
+                    <strong>Threshold Impact:</strong> ${data.threshold_info.description}
+                </div>
+            `;
+            
+            previewSection.innerHTML = html;
+        }
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            updateThresholdDisplay();
+            
+            // Add event listeners
+            const slider = document.getElementById('id_similarity_threshold');
+            if (slider) {
+                slider.addEventListener('input', updateThresholdDisplay);
+            }
+            
+            const subjectFilter = document.getElementById('id_subject_area_filter');
+            if (subjectFilter) {
+                subjectFilter.addEventListener('change', updatePreview);
+            }
+            
+            const stateFilter = document.getElementById('id_state_filter');
+            if (stateFilter) {
+                stateFilter.addEventListener('change', updatePreview);
+            }
+        });
+    </script>
+{% endblock %}
+
+{% block content %}
+<div class="module">
+    <h1>Generate Standard Correlations</h1>
+    
+    <!-- Current Statistics -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-number">{{ current_stats.total_correlations }}</div>
+            <div class="stat-label">Total Correlations</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ current_stats.standards_with_embeddings }}</div>
+            <div class="stat-label">Standards with Embeddings</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-number">{{ current_stats.standards_without_embeddings }}</div>
+            <div class="stat-label">Standards without Embeddings</div>
+        </div>
+    </div>
+    
+    {% if current_stats.standards_without_embeddings > 0 %}
+    <div class="warning-box">
+        <strong>Warning:</strong> {{ current_stats.standards_without_embeddings }} standards don't have embeddings. 
+        <a href="{% url 'admin:standards_standard_changelist' %}">Generate embeddings first</a> for better correlation results.
+    </div>
+    {% endif %}
+    
+    <form method="post" class="aligned">
+        {% csrf_token %}
+        
+        <!-- Threshold Selection -->
+        <div class="threshold-slider-container">
+            <h3>Similarity Threshold</h3>
+            <div class="form-row">
+                <div>
+                    <label for="{{ form.similarity_threshold.id_for_label }}">{{ form.similarity_threshold.label }}:</label>
+                    {{ form.similarity_threshold }}
+                    <div class="slider-display">
+                        Threshold: <span id="threshold-display">0.80</span>
+                    </div>
+                    <div id="threshold-info" class="threshold-info"></div>
+                    {% if form.similarity_threshold.help_text %}
+                        <div class="help">{{ form.similarity_threshold.help_text }}</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Configuration Options -->
+        <fieldset class="module aligned">
+            <h2>Configuration Options</h2>
+            
+            <div class="form-row">
+                <div>
+                    <label for="{{ form.clear_existing.id_for_label }}">{{ form.clear_existing.label }}:</label>
+                    {{ form.clear_existing }}
+                    {% if form.clear_existing.help_text %}
+                        <p class="help">{{ form.clear_existing.help_text }}</p>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <div class="form-row">
+                <div>
+                    <label for="{{ form.batch_size.id_for_label }}">{{ form.batch_size.label }}:</label>
+                    {{ form.batch_size }}
+                    {% if form.batch_size.help_text %}
+                        <p class="help">{{ form.batch_size.help_text }}</p>
+                    {% endif %}
+                </div>
+            </div>
+        </fieldset>
+        
+        <!-- Filtering Options -->
+        <fieldset class="module aligned">
+            <h2>Filtering Options</h2>
+            
+            <div class="form-row">
+                <div>
+                    <label for="{{ form.subject_area_filter.id_for_label }}">{{ form.subject_area_filter.label }}:</label>
+                    {{ form.subject_area_filter }}
+                    {% if form.subject_area_filter.help_text %}
+                        <p class="help">{{ form.subject_area_filter.help_text }}</p>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <div class="form-row">
+                <div>
+                    <label for="{{ form.state_filter.id_for_label }}">{{ form.state_filter.label }}:</label>
+                    {{ form.state_filter }}
+                    {% if form.state_filter.help_text %}
+                        <p class="help">{{ form.state_filter.help_text }}</p>
+                    {% endif %}
+                </div>
+            </div>
+        </fieldset>
+        
+        <!-- Preview Section -->
+        <div class="preview-section" id="preview-section">
+            <h3>Loading preview...</h3>
+        </div>
+        
+        <!-- Submit Buttons -->
+        <div class="submit-row">
+            <input type="submit" value="Preview Correlation Generation" class="default" name="_preview" />
+            <a href="{% url 'admin_correlation_analysis' %}" class="button">Threshold Analysis</a>
+            <a href="{% url 'admin:standards_standardcorrelation_changelist' %}" class="button">View Existing Correlations</a>
+        </div>
+    </form>
+    
+    <!-- Recent Jobs -->
+    {% if recent_jobs %}
+    <div class="recent-jobs">
+        <h2>Recent Correlation Jobs</h2>
+        {% for job in recent_jobs %}
+        <div class="job-item">
+            <div>
+                <strong>{{ job.get_job_display }}</strong>
+                <br>
+                <small>Threshold: {{ job.similarity_threshold }} | {{ job.created_at|date:"M d, Y H:i" }}</small>
+            </div>
+            <div>
+                <span class="job-status status-{{ job.status }}">{{ job.get_status_display }}</span>
+                {% if job.is_active %}
+                    <a href="{% url 'admin_correlation_status' job.id %}" class="button">View Progress</a>
+                {% endif %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

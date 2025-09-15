@@ -1,0 +1,671 @@
+{% extends 'dashboard/base.html' %}
+
+{% block title %}Topic Intelligence Dashboard{% endblock %}
+
+{% block content %}
+<div class="dashboard-header">
+    <div class="container">
+        <h1>{{ title }}</h1>
+        <p class="lead">{{ subtitle }}</p>
+    </div>
+</div>
+
+<div class="container">
+    <!-- Overview Stats -->
+    <div class="row mb-4">
+        <div class="col-md-3 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number">{{ total_topics }}</div>
+                    <h6 class="card-title">Topics Analyzed</h6>
+                    <p class="text-muted">Across all states</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number" id="mustHaveCount">0</div>
+                    <h6 class="card-title">Must-Have Topics</h6>
+                    <p class="text-muted">90%+ states</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number" id="importantCount">0</div>
+                    <h6 class="card-title">Important Topics</h6>
+                    <p class="text-muted">60-89% states</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number" id="regionalCount">0</div>
+                    <h6 class="card-title">Regional Topics</h6>
+                    <p class="text-muted">30-59% states</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Topic Management Actions -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">🛠️ Topic Management</h5>
+                    <small class="text-muted">Add new topics, run analysis, and manage existing topics</small>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <!-- Add Topic Form -->
+                        <div class="col-md-4">
+                            <h6 class="text-primary mb-3">➕ Add New Topic</h6>
+                            <form id="addTopicForm">
+                                <div class="mb-3">
+                                    <label for="topicName" class="form-label">Topic Name</label>
+                                    <input type="text" class="form-control" id="topicName" name="name" placeholder="e.g., Fraction Operations" required>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="topicDescription" class="form-label">Description</label>
+                                    <textarea class="form-control" id="topicDescription" name="description" rows="2" placeholder="Describe this educational concept..."></textarea>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="topicSubjects" class="form-label">Subject Areas</label>
+                                    <select multiple class="form-select" id="topicSubjects" name="subject_areas">
+                                        {% for subject in subject_areas %}
+                                        <option value="{{ subject.id }}">{{ subject.name }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="topicKeywords" class="form-label">Keywords</label>
+                                    <input type="text" class="form-control" id="topicKeywords" name="keywords" placeholder="keyword1, keyword2, keyword3">
+                                </div>
+                                <button type="submit" class="btn btn-primary w-100">
+                                    <span class="spinner-border spinner-border-sm d-none" role="status" id="addTopicSpinner"></span>
+                                    Add Topic
+                                </button>
+                            </form>
+                        </div>
+                        
+                        <!-- Run Analysis -->
+                        <div class="col-md-4">
+                            <h6 class="text-success mb-3">🔍 Run Topic Analysis</h6>
+                            <form id="runAnalysisForm">
+                                <div class="mb-3">
+                                    <label for="analysisType" class="form-label">Analysis Type</label>
+                                    <select class="form-select" id="analysisType" name="analysis_type">
+                                        <option value="discover">Discover New Topics</option>
+                                        <option value="update_coverage">Update Coverage Statistics</option>
+                                        <option value="cluster_refinement">Refine Existing Clusters</option>
+                                        <option value="full_analysis">Full Topic Analysis</option>
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="analysisSubject" class="form-label">Subject Area</label>
+                                    <select class="form-select" id="analysisSubject" name="subject_area">
+                                        <option value="">All Subject Areas</option>
+                                        {% for subject in subject_areas %}
+                                        <option value="{{ subject.id }}">{{ subject.name }}</option>
+                                        {% endfor %}
+                                    </select>
+                                </div>
+                                <div class="mb-3">
+                                    <label for="minStandards" class="form-label">Min Standards per Topic</label>
+                                    <input type="number" class="form-control" id="minStandards" name="min_standards_per_topic" value="5" min="2" max="50">
+                                </div>
+                                <div class="mb-3">
+                                    <label for="similarityThreshold" class="form-label">Similarity Threshold</label>
+                                    <input type="number" class="form-control" id="similarityThreshold" name="similarity_threshold" value="0.75" step="0.05" min="0.1" max="1.0">
+                                </div>
+                                <button type="submit" class="btn btn-success w-100">
+                                    <span class="spinner-border spinner-border-sm d-none" role="status" id="analysisSpinner"></span>
+                                    Run Analysis
+                                </button>
+                            </form>
+                            
+                            <!-- Analysis Status -->
+                            <div id="analysisStatus" class="mt-3 d-none">
+                                <div class="card border-info">
+                                    <div class="card-body">
+                                        <h6 class="card-title">Analysis Status</h6>
+                                        <div class="progress mb-2">
+                                            <div class="progress-bar" role="progressbar" id="analysisProgress" style="width: 0%"></div>
+                                        </div>
+                                        <p class="card-text mb-0" id="analysisMessage">Starting analysis...</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Quick Actions -->
+                        <div class="col-md-4">
+                            <h6 class="text-info mb-3">⚡ Quick Actions</h6>
+                            <div class="d-grid gap-2">
+                                <button class="btn btn-outline-primary" onclick="refreshTopics()">
+                                    🔄 Refresh Topics List
+                                </button>
+                                <button class="btn btn-outline-secondary" onclick="exportTopics()">
+                                    📊 Export Topic Data
+                                </button>
+                                <a href="{% url 'admin:standards_concept_changelist' %}" class="btn btn-outline-info">
+                                    🛠️ Manage Concepts (Admin)
+                                </a>
+                                <a href="{% url 'admin:standards_topiccluster_changelist' %}" class="btn btn-outline-warning">
+                                    📂 View Topic Clusters (Admin)
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-body">
+                    <div class="row align-items-center">
+                        <div class="col-md-4">
+                            <label for="subjectFilter" class="form-label">Filter by Subject</label>
+                            <select class="form-select" id="subjectFilter">
+                                <option value="">All Subjects</option>
+                                {% for subject in subject_areas %}
+                                <option value="{{ subject.name }}">{{ subject.name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="categoryFilter" class="form-label">Filter by Category</label>
+                            <select class="form-select" id="categoryFilter">
+                                <option value="">All Categories</option>
+                                <option value="must-have">Must-Have (90%+ states)</option>
+                                <option value="important">Important (60-89% states)</option>
+                                <option value="regional">Regional (30-59% states)</option>
+                                <option value="specialized">Specialized (<30% states)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="sortBy" class="form-label">Sort By</label>
+                            <select class="form-select" id="sortBy">
+                                <option value="prevalence">Prevalence (High to Low)</option>
+                                <option value="alphabetical">Alphabetical</option>
+                                <option value="category">Category</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Topic Prevalence List -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">🧠 Topic Prevalence Across States</h5>
+                    <small class="text-muted">Showing how many states require each topic</small>
+                </div>
+                <div class="card-body">
+                    <div id="topicsList">
+                        {% if topics %}
+                            {% for topic in topics %}
+                            <div class="topic-item mb-3" data-category="{{ topic.category }}" data-subject="{{ topic.subject_areas|join:',' }}" data-name="{{ topic.name }}">
+                                <div class="row align-items-center">
+                                    <div class="col-md-4">
+                                        <h6 class="mb-1">{{ topic.name }}</h6>
+                                        {% if topic.description %}
+                                        <small class="text-muted">{{ topic.description|truncatechars:100 }}</small>
+                                        {% endif %}
+                                        {% if topic.subject_areas %}
+                                        <div class="mt-1">
+                                            {% for subject in topic.subject_areas %}
+                                            <span class="badge bg-light text-dark me-1">{{ subject }}</span>
+                                            {% endfor %}
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                    <div class="col-md-6">
+                                        <div class="topic-bar">
+                                            <div class="topic-fill {{ topic.category }}" 
+                                                 style="width: {{ topic.prevalence_percentage }}%"
+                                                 title="{{ topic.prevalence_percentage }}% prevalence"></div>
+                                        </div>
+                                        <small class="text-muted">
+                                            {{ topic.state_count }}/50 states ({{ topic.prevalence_percentage }}%)
+                                        </small>
+                                    </div>
+                                    <div class="col-md-2 text-end">
+                                        <span class="badge 
+                                            {% if topic.category == 'must-have' %}bg-success
+                                            {% elif topic.category == 'important' %}bg-info  
+                                            {% elif topic.category == 'regional' %}bg-warning
+                                            {% else %}bg-secondary{% endif %}">
+                                            {{ topic.category|title }}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="text-center py-5">
+                                <div class="mb-3" style="font-size: 4rem; opacity: 0.3;">🧠</div>
+                                <h6>No Topics Analyzed Yet</h6>
+                                <p class="text-muted">
+                                    We need to analyze your standards to discover topic patterns.<br>
+                                    This data comes from concept analysis and topic clustering.
+                                </p>
+                                <a href="{% url 'admin:standards_concept_changelist' %}" class="btn btn-outline-primary me-2">
+                                    Manage Concepts
+                                </a>
+                                <a href="{% url 'admin:standards_topiccluster_changelist' %}" class="btn btn-outline-secondary">
+                                    View Topic Clusters
+                                </a>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Category Breakdown Chart -->
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h5 class="mb-0">📊 Topic Categories</h5>
+                </div>
+                <div class="card-body">
+                    <canvas id="categoryChart" height="200"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card h-100">
+                <div class="card-header">
+                    <h5 class="mb-0">📈 Prevalence Distribution</h5>
+                </div>
+                <div class="card-body">
+                    <canvas id="prevalenceChart" height="200"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Content Strategy Recommendations -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">💡 Content Strategy Recommendations</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6 class="text-success">🎯 Priority 1: Must-Have Topics</h6>
+                            <p class="mb-2">Focus on these topics for maximum state coverage:</p>
+                            <ul class="list-unstyled">
+                                {% for topic in topics %}
+                                    {% if topic.category == 'must-have' %}
+                                    <li class="mb-1">
+                                        <span class="badge bg-success me-2">{{ topic.state_count }}/50</span>
+                                        <strong>{{ topic.name }}</strong>
+                                    </li>
+                                    {% endif %}
+                                {% endfor %}
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <h6 class="text-info">📍 Priority 2: Regional Specialization</h6>
+                            <p class="mb-2">Consider regional variations for these topics:</p>
+                            <ul class="list-unstyled">
+                                {% for topic in topics %}
+                                    {% if topic.category == 'regional' %}
+                                    <li class="mb-1">
+                                        <span class="badge bg-warning me-2">{{ topic.state_count }}/50</span>
+                                        <strong>{{ topic.name }}</strong>
+                                    </li>
+                                    {% endif %}
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Topic management functionality
+document.addEventListener('DOMContentLoaded', function() {
+    const subjectFilter = document.getElementById('subjectFilter');
+    const categoryFilter = document.getElementById('categoryFilter');
+    const sortBy = document.getElementById('sortBy');
+    const topicsList = document.getElementById('topicsList');
+    
+    // Initialize topic management
+    initializeTopicManagement();
+    
+    // Calculate and update counts
+    updateCounts();
+    
+    function updateCounts() {
+        const topics = {{ topics|safe }};
+        const counts = {
+            'must-have': 0,
+            'important': 0,
+            'regional': 0,
+            'specialized': 0
+        };
+        
+        topics.forEach(topic => {
+            if (counts[topic.category] !== undefined) {
+                counts[topic.category]++;
+            }
+        });
+        
+        document.getElementById('mustHaveCount').textContent = counts['must-have'];
+        document.getElementById('importantCount').textContent = counts['important'];
+        document.getElementById('regionalCount').textContent = counts['regional'];
+        
+        return counts;
+    }
+    
+    function filterAndSort() {
+        const items = Array.from(topicsList.querySelectorAll('.topic-item'));
+        const selectedSubject = subjectFilter.value;
+        const selectedCategory = categoryFilter.value;
+        const sortMethod = sortBy.value;
+        
+        // Filter items
+        items.forEach(item => {
+            const itemSubjects = item.dataset.subject;
+            const itemCategory = item.dataset.category;
+            
+            const subjectMatch = !selectedSubject || itemSubjects.includes(selectedSubject);
+            const categoryMatch = !selectedCategory || itemCategory === selectedCategory;
+            
+            item.style.display = (subjectMatch && categoryMatch) ? 'block' : 'none';
+        });
+        
+        // Sort visible items
+        const visibleItems = items.filter(item => item.style.display !== 'none');
+        
+        visibleItems.sort((a, b) => {
+            switch (sortMethod) {
+                case 'alphabetical':
+                    return a.dataset.name.localeCompare(b.dataset.name);
+                case 'category':
+                    const categoryOrder = {'must-have': 0, 'important': 1, 'regional': 2, 'specialized': 3};
+                    return categoryOrder[a.dataset.category] - categoryOrder[b.dataset.category];
+                case 'prevalence':
+                default:
+                    const aPrevalence = parseFloat(a.querySelector('.topic-fill').style.width);
+                    const bPrevalence = parseFloat(b.querySelector('.topic-fill').style.width);
+                    return bPrevalence - aPrevalence;
+            }
+        });
+        
+        // Reorder in DOM
+        visibleItems.forEach(item => {
+            topicsList.appendChild(item);
+        });
+    }
+    
+    subjectFilter.addEventListener('change', filterAndSort);
+    categoryFilter.addEventListener('change', filterAndSort);
+    sortBy.addEventListener('change', filterAndSort);
+    
+    // Initialize charts
+    initializeCharts();
+});
+
+function initializeCharts() {
+    // Topic Categories Chart
+    const categoryCtx = document.getElementById('categoryChart').getContext('2d');
+    const counts = updateCounts();
+    const categoryData = {
+        'Must-Have': counts['must-have'],
+        'Important': counts['important'],
+        'Regional': counts['regional'],
+        'Specialized': counts['specialized']
+    };
+    
+    new Chart(categoryCtx, {
+        type: 'doughnut',
+        data: {
+            labels: Object.keys(categoryData),
+            datasets: [{
+                data: Object.values(categoryData),
+                backgroundColor: ['#28a745', '#17a2b8', '#ffc107', '#6c757d'],
+                borderWidth: 2,
+                borderColor: '#fff'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'bottom'
+                }
+            }
+        }
+    });
+    
+    // Prevalence Distribution Chart
+    const prevalenceCtx = document.getElementById('prevalenceChart').getContext('2d');
+    const topics = {{ topics|safe }};
+    
+    // Create prevalence bins
+    const bins = {'0-25%': 0, '26-50%': 0, '51-75%': 0, '76-100%': 0};
+    topics.forEach(topic => {
+        const prevalence = topic.prevalence_percentage;
+        if (prevalence <= 25) bins['0-25%']++;
+        else if (prevalence <= 50) bins['26-50%']++;
+        else if (prevalence <= 75) bins['51-75%']++;
+        else bins['76-100%']++;
+    });
+    
+    new Chart(prevalenceCtx, {
+        type: 'bar',
+        data: {
+            labels: Object.keys(bins),
+            datasets: [{
+                label: 'Number of Topics',
+                data: Object.values(bins),
+                backgroundColor: ['#dc3545', '#ffc107', '#17a2b8', '#28a745'],
+                borderWidth: 1
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    ticks: {
+                        stepSize: 1
+                    }
+                }
+            },
+            plugins: {
+                legend: {
+                    display: false
+                }
+            }
+        }
+    });
+}
+
+// Topic Management Functions
+function initializeTopicManagement() {
+    // Add Topic Form Handler
+    document.getElementById('addTopicForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = new FormData(this);
+        const data = {
+            name: formData.get('name'),
+            description: formData.get('description'),
+            keywords: formData.get('keywords'),
+            subject_areas: Array.from(document.getElementById('topicSubjects').selectedOptions).map(option => option.value)
+        };
+        
+        const spinner = document.getElementById('addTopicSpinner');
+        const button = this.querySelector('button[type="submit"]');
+        
+        spinner.classList.remove('d-none');
+        button.disabled = true;
+        
+        fetch('{% url "dashboard:create_topic_api" %}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            },
+            body: JSON.stringify(data)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert('Topic created successfully!');
+                this.reset();
+                refreshTopics();
+            } else {
+                alert('Error creating topic: ' + JSON.stringify(data.errors));
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Error creating topic');
+        })
+        .finally(() => {
+            spinner.classList.add('d-none');
+            button.disabled = false;
+        });
+    });
+    
+    // Run Analysis Form Handler
+    document.getElementById('runAnalysisForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        
+        const formData = new FormData(this);
+        const data = {
+            analysis_type: formData.get('analysis_type'),
+            subject_area: formData.get('subject_area') || null,
+            min_standards_per_topic: parseInt(formData.get('min_standards_per_topic')),
+            similarity_threshold: parseFloat(formData.get('similarity_threshold'))
+        };
+        
+        const spinner = document.getElementById('analysisSpinner');
+        const button = this.querySelector('button[type="submit"]');
+        const statusDiv = document.getElementById('analysisStatus');
+        
+        spinner.classList.remove('d-none');
+        button.disabled = true;
+        statusDiv.classList.remove('d-none');
+        
+        fetch('{% url "dashboard:run_topic_analysis_api" %}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            },
+            body: JSON.stringify(data)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.job_id) {
+                pollAnalysisStatus(data.job_id);
+            } else {
+                alert('Error starting analysis: ' + (data.error || 'Unknown error'));
+                statusDiv.classList.add('d-none');
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Error starting analysis');
+            statusDiv.classList.add('d-none');
+        })
+        .finally(() => {
+            spinner.classList.add('d-none');
+            button.disabled = false;
+        });
+    });
+}
+
+function pollAnalysisStatus(jobId) {
+    const statusDiv = document.getElementById('analysisStatus');
+    const progressBar = document.getElementById('analysisProgress');
+    const messageElement = document.getElementById('analysisMessage');
+    
+    const checkStatus = () => {
+        fetch(`{% url "dashboard:topic_analysis_status_api" job_id="PLACEHOLDER" %}`.replace('PLACEHOLDER', jobId))
+            .then(response => response.json())
+            .then(data => {
+                progressBar.style.width = data.progress + '%';
+                progressBar.textContent = data.progress + '%';
+                messageElement.textContent = data.message;
+                
+                if (data.status === 'completed') {
+                    progressBar.classList.add('bg-success');
+                    setTimeout(() => {
+                        statusDiv.classList.add('d-none');
+                        refreshTopics();
+                    }, 3000);
+                } else if (data.status === 'failed') {
+                    progressBar.classList.add('bg-danger');
+                    messageElement.textContent = 'Analysis failed: ' + data.message;
+                } else if (data.status === 'running' || data.status === 'queued') {
+                    setTimeout(checkStatus, 2000); // Check again in 2 seconds
+                }
+            })
+            .catch(error => {
+                console.error('Error checking status:', error);
+                messageElement.textContent = 'Error checking analysis status';
+                progressBar.classList.add('bg-danger');
+            });
+    };
+    
+    checkStatus();
+}
+
+function refreshTopics() {
+    location.reload();
+}
+
+function exportTopics() {
+    const topics = {{ topics|safe }};
+    const csvContent = "data:text/csv;charset=utf-8," + 
+        "Name,Description,State Count,Prevalence %,Category,Subject Areas\n" +
+        topics.map(topic => [
+            topic.name,
+            topic.description.replace(/,/g, ';'),
+            topic.state_count,
+            topic.prevalence_percentage,
+            topic.category,
+            topic.subject_areas.join(';')
+        ].join(',')).join('\n');
+    
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', 'topics_analysis.csv');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+</script>
+{% endblock %}

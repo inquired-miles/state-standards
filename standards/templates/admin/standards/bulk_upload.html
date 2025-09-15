@@ -1,0 +1,357 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block title %}Bulk Upload Standards{% endblock %}
+
+{% block extrahead %}
+<link rel="stylesheet" href="{% static 'admin/css/forms.css' %}">
+<style>
+    .upload-container {
+        max-width: 800px;
+        margin: 0 auto;
+    }
+    .upload-box {
+        border: 2px dashed var(--hairline-color);
+        border-radius: 10px;
+        padding: 40px;
+        text-align: center;
+        margin: 20px 0;
+        background-color: var(--darkened-bg);
+        color: var(--body-fg);
+        cursor: pointer;
+        transition: all 0.3s ease;
+    }
+    .upload-box:hover, .upload-box.dragover {
+        border-color: var(--link-fg);
+        background-color: var(--selected-bg);
+    }
+    .upload-box.has-file {
+        border-color: #28a745;
+        background-color: var(--selected-bg);
+    }
+    .upload-box h3, .upload-box p {
+        color: var(--body-fg);
+        margin: 10px 0;
+    }
+    .upload-icon {
+        font-size: 48px;
+        color: var(--link-fg);
+        margin-bottom: 20px;
+    }
+    .file-info {
+        margin-top: 20px;
+        padding: 15px;
+        background-color: var(--darkened-bg);
+        color: var(--body-fg);
+        border-radius: 5px;
+        border: 1px solid var(--hairline-color);
+    }
+    .recent-jobs {
+        margin-top: 30px;
+    }
+    .recent-jobs h2 {
+        color: var(--body-fg);
+    }
+    .job-item {
+        padding: 10px;
+        border: 1px solid var(--hairline-color);
+        border-radius: 5px;
+        margin-bottom: 10px;
+        background-color: var(--body-bg);
+        color: var(--body-fg);
+    }
+    .job-status {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 3px;
+        font-size: 12px;
+        font-weight: bold;
+    }
+    .job-status.pending { background-color: #ffc107; color: #212529; }
+    .job-status.processing { background-color: #17a2b8; color: white; }
+    .job-status.completed { background-color: #28a745; color: white; }
+    .job-status.failed { background-color: #dc3545; color: white; }
+    .job-status.cancelled { background-color: #6c757d; color: white; }
+    .form-row {
+        margin-bottom: 15px;
+    }
+    .form-row label {
+        color: var(--body-fg);
+    }
+    .help-text {
+        font-size: 12px;
+        color: var(--body-quiet-color);
+        margin-top: 5px;
+    }
+    .warning-box {
+        background-color: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 5px;
+        padding: 15px;
+        margin: 15px 0;
+        color: #856404;
+    }
+    .warning-box h4 {
+        color: #856404;
+        margin-top: 0;
+    }
+    
+    /* Form options section */
+    .form-options h3 {
+        color: var(--body-fg);
+    }
+    
+    /* Module styling consistency */
+    .module {
+        background-color: var(--body-bg);
+        border: 1px solid var(--hairline-color);
+        border-radius: 4px;
+    }
+    
+    /* Ensure form inputs are visible */
+    input[type="file"],
+    input[type="checkbox"],
+    input[type="number"],
+    select {
+        background-color: var(--body-bg);
+        color: var(--body-fg);
+        border: 1px solid var(--border-color);
+    }
+    
+    /* Dark theme support fallback */
+    @media (prefers-color-scheme: dark) {
+        .upload-box {
+            background-color: #1e1e1e;
+            color: #f8f9fa;
+            border-color: #555;
+        }
+        .upload-box:hover, .upload-box.dragover {
+            background-color: #2d3748;
+        }
+        .upload-box h3, .upload-box p {
+            color: #f8f9fa;
+        }
+        .file-info {
+            background-color: #2b2b2b;
+            color: #f8f9fa;
+            border-color: #555;
+        }
+        .job-item {
+            background-color: #2b2b2b;
+            color: #f8f9fa;
+            border-color: #555;
+        }
+        .form-row label {
+            color: #f8f9fa;
+        }
+        .help-text {
+            color: #aaa;
+        }
+        .form-options h3,
+        .recent-jobs h2 {
+            color: #f8f9fa;
+        }
+        input[type="file"],
+        input[type="checkbox"],
+        input[type="number"],
+        select {
+            background-color: #2b2b2b;
+            color: #f8f9fa;
+            border-color: #555;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="upload-container">
+    <h1>Bulk Upload Standards</h1>
+    
+    <div class="module">
+        <div class="upload-section">
+            <form method="post" enctype="multipart/form-data" id="upload-form">
+                {% csrf_token %}
+                
+                <div class="upload-box" id="upload-box">
+                    <div class="upload-icon">📁</div>
+                    <div class="upload-text">
+                        <h3>Click to select file or drag and drop</h3>
+                        <p>Accepted formats: CSV, JSON (Max size: 50MB)</p>
+                    </div>
+                    {{ form.file }}
+                    <div class="file-info" id="file-info" style="display: none;"></div>
+                </div>
+                
+                {% if form.file.errors %}
+                    <div class="errornote">
+                        {{ form.file.errors }}
+                    </div>
+                {% endif %}
+                
+                <div class="form-options">
+                    <h3>Upload Options</h3>
+                    
+                    <div class="form-row">
+                        {{ form.generate_embeddings }}
+                        <label for="{{ form.generate_embeddings.id_for_label }}">
+                            {{ form.generate_embeddings.label }}
+                        </label>
+                        <div class="help-text">{{ form.generate_embeddings.help_text }}</div>
+                    </div>
+                    
+                    <div class="form-row">
+                        <label for="{{ form.batch_size.id_for_label }}">{{ form.batch_size.label }}:</label>
+                        {{ form.batch_size }}
+                        <div class="help-text">{{ form.batch_size.help_text }}</div>
+                    </div>
+                    
+                    <div class="form-row">
+                        {{ form.clear_existing }}
+                        <label for="{{ form.clear_existing.id_for_label }}" style="color: #dc3545; font-weight: bold;">
+                            {{ form.clear_existing.label }}
+                        </label>
+                        <div class="help-text" style="color: #dc3545;">{{ form.clear_existing.help_text }}</div>
+                    </div>
+                    
+                    <div class="warning-box" id="clear-warning" style="display: none;">
+                        <h4>⚠️ Warning: Clear Existing Data</h4>
+                        <p>This will permanently delete ALL existing standards in the database before importing new ones. 
+                        This action cannot be undone. Please ensure you have a backup.</p>
+                    </div>
+                </div>
+                
+                <div class="submit-row">
+                    <input type="submit" value="Preview Upload" class="default" id="submit-btn">
+                    <a href="{% url 'admin_generate_template' %}" class="button">Download Template</a>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    {% if recent_jobs %}
+    <div class="recent-jobs">
+        <h2>Recent Upload Jobs</h2>
+        {% for job in recent_jobs %}
+        <div class="job-item">
+            <div style="display: flex; justify-content: between; align-items: center;">
+                <div style="flex: 1;">
+                    <strong>{{ job.original_filename }}</strong>
+                    <span class="job-status {{ job.status }}">{{ job.get_status_display }}</span>
+                    <div style="font-size: 12px; color: #666; margin-top: 5px;">
+                        {{ job.created_at|date:"M d, Y H:i" }} - 
+                        {{ job.processed_records }}/{{ job.total_records }} records
+                        ({{ job.progress_percentage|floatformat:1 }}%)
+                    </div>
+                </div>
+                <div>
+                    <a href="{% url 'admin_upload_status' job.id %}" class="button">View Status</a>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const uploadBox = document.getElementById('upload-box');
+    const fileInput = document.getElementById('id_upload_file');
+    const fileInfo = document.getElementById('file-info');
+    const clearExistingCheckbox = document.getElementById('id_clear_existing');
+    const clearWarning = document.getElementById('clear-warning');
+    const submitBtn = document.getElementById('submit-btn');
+    
+    // File input change handler
+    fileInput.addEventListener('change', function(e) {
+        handleFileSelect(e.target.files[0]);
+    });
+    
+    // Drag and drop handlers
+    uploadBox.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        uploadBox.classList.add('dragover');
+    });
+    
+    uploadBox.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        uploadBox.classList.remove('dragover');
+    });
+    
+    uploadBox.addEventListener('drop', function(e) {
+        e.preventDefault();
+        uploadBox.classList.remove('dragover');
+        
+        const files = e.dataTransfer.files;
+        if (files.length > 0) {
+            fileInput.files = files;
+            handleFileSelect(files[0]);
+        }
+    });
+    
+    // Click to select file
+    uploadBox.addEventListener('click', function() {
+        fileInput.click();
+    });
+    
+    // Clear existing checkbox handler
+    clearExistingCheckbox.addEventListener('change', function() {
+        clearWarning.style.display = this.checked ? 'block' : 'none';
+    });
+    
+    function handleFileSelect(file) {
+        if (!file) {
+            uploadBox.classList.remove('has-file');
+            fileInfo.style.display = 'none';
+            return;
+        }
+        
+        // Validate file type
+        const validExtensions = ['.csv', '.json'];
+        const fileName = file.name.toLowerCase();
+        const isValid = validExtensions.some(ext => fileName.endsWith(ext));
+        
+        if (!isValid) {
+            alert('Please select a CSV or JSON file.');
+            fileInput.value = '';
+            return;
+        }
+        
+        // Validate file size (50MB)
+        const maxSize = 50 * 1024 * 1024;
+        if (file.size > maxSize) {
+            alert('File is too large. Maximum size is 50MB.');
+            fileInput.value = '';
+            return;
+        }
+        
+        uploadBox.classList.add('has-file');
+        fileInfo.innerHTML = `
+            <strong>Selected File:</strong> ${file.name}<br>
+            <strong>Size:</strong> ${(file.size / 1024 / 1024).toFixed(2)} MB<br>
+            <strong>Type:</strong> ${file.type || 'Unknown'}
+        `;
+        fileInfo.style.display = 'block';
+    }
+    
+    // Form submission validation
+    document.getElementById('upload-form').addEventListener('submit', function(e) {
+        if (!fileInput.files.length) {
+            e.preventDefault();
+            alert('Please select a file to upload.');
+            return;
+        }
+        
+        if (clearExistingCheckbox.checked) {
+            if (!confirm('Are you sure you want to clear all existing standards? This action cannot be undone.')) {
+                e.preventDefault();
+                return;
+            }
+        }
+        
+        submitBtn.disabled = true;
+        submitBtn.value = 'Processing...';
+    });
+});
+</script>
+{% endblock %}

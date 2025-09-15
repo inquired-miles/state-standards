@@ -1,0 +1,91 @@
+{% extends "admin/base.html" %}
+
+{% block title %}{{ title }} | Educational Standards Admin{% endblock %}
+
+{% block branding %}
+<div id="site-name">
+    <a href="{% url 'admin:index' %}">Educational Standards Admin</a>
+</div>
+{% endblock %}
+
+{% block nav-global %}
+<div id="header">
+    <div id="branding">
+        {% block branding %}{% endblock %}
+    </div>
+    {% block usertools %}
+    {% if has_permission %}
+    <div id="user-tools">
+        <div class="dropdown">
+            <button class="btn btn-sm btn-outline-light dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                📊 Dashboard
+            </button>
+            <ul class="dropdown-menu">
+                <li><a class="dropdown-item" href="{% url 'dashboard:home' %}">🏠 Dashboard Home</a></li>
+                <li><a class="dropdown-item" href="{% url 'dashboard:coverage' %}">🗺️ Coverage Map</a></li>
+                <li><a class="dropdown-item" href="{% url 'dashboard:groupings' %}">🏛️ State Groupings</a></li>
+                <li><a class="dropdown-item" href="{% url 'dashboard:topics' %}">🧠 Topic Intelligence</a></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item" href="{% url 'admin:standards_standard_changelist' %}">⚙️ Manage Standards</a></li>
+                <li><a class="dropdown-item" href="{% url 'admin:standards_standardcorrelation_changelist' %}">🔗 View Correlations</a></li>
+            </ul>
+        </div>
+        {% load i18n %}
+        Welcome, <strong>{% firstof user.get_short_name user.get_username %}</strong>. 
+        <a href="{% url 'admin:logout' %}">{% translate 'Log out' %}</a>
+    </div>
+    {% endif %}
+    {% endblock %}
+</div>
+
+<style>
+.dropdown {
+    display: inline-block;
+    margin-right: 20px;
+}
+.dropdown-menu {
+    background: white;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    min-width: 200px;
+}
+.dropdown-item {
+    padding: 8px 16px;
+    text-decoration: none;
+    color: #333;
+    display: block;
+}
+.dropdown-item:hover {
+    background: #f8f9fa;
+    color: #333;
+}
+#user-tools {
+    display: flex;
+    align-items: center;
+    padding: 10px;
+}
+</style>
+
+<script>
+// Simple dropdown functionality
+document.addEventListener('DOMContentLoaded', function() {
+    const dropdownToggle = document.querySelector('.dropdown-toggle');
+    const dropdownMenu = document.querySelector('.dropdown-menu');
+    
+    if (dropdownToggle && dropdownMenu) {
+        dropdownToggle.addEventListener('click', function(e) {
+            e.preventDefault();
+            dropdownMenu.style.display = dropdownMenu.style.display === 'block' ? 'none' : 'block';
+        });
+        
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function(e) {
+            if (!dropdownToggle.contains(e.target) && !dropdownMenu.contains(e.target)) {
+                dropdownMenu.style.display = 'none';
+            }
+        });
+    }
+});
+</script>
+{% endblock %}

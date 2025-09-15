@@ -1,0 +1,286 @@
+{% extends 'dashboard/base.html' %}
+
+{% block title %}State Groupings Discovery{% endblock %}
+
+{% block content %}
+<div class="dashboard-header">
+    <div class="container">
+        <h1>{{ title }}</h1>
+        <p class="lead">{{ subtitle }}</p>
+    </div>
+</div>
+
+<div class="container">
+    <!-- Overview Stats -->
+    <div class="row mb-4">
+        <div class="col-md-4 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number">{{ total_groups }}</div>
+                    <h6 class="card-title">Similar Groups</h6>
+                    <p class="text-muted">Regional clusters found</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number">{{ groupings|length|add:unique_states|length }}</div>
+                    <h6 class="card-title">States Analyzed</h6>
+                    <p class="text-muted">Total coverage</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-4 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number">{{ unique_states|length }}</div>
+                    <h6 class="card-title">Unique States</h6>
+                    <p class="text-muted">Need custom content</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Identical Requirement Clusters -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">🏛️ Similar State Clusters</h5>
+                    <small class="text-muted">Build once, deploy to multiple states</small>
+                </div>
+                <div class="card-body">
+                    {% if groupings %}
+                        {% for group in groupings %}
+                        <div class="state-group {{ group.region|lower }}">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <h6 class="mb-2">
+                                        {{ group.region }} Block 
+                                        <span class="badge bg-primary">{{ group.similarity_percentage }}% similar</span>
+                                    </h6>
+                                    <div class="mb-2">
+                                        {% for state in group.states %}
+                                            <span class="badge bg-outline-secondary me-1">{{ state }}</span>
+                                        {% endfor %}
+                                    </div>
+                                    <p class="text-muted mb-0">
+                                        <strong>Strategy:</strong> Build once, deploy to {{ group.state_count }} states
+                                    </p>
+                                </div>
+                                <div class="col-md-4 text-end">
+                                    <div class="h-100 d-flex flex-column justify-content-center">
+                                        <div class="metric-number text-success" style="font-size: 1.5rem;">
+                                            {{ group.state_count }}
+                                        </div>
+                                        <small class="text-muted">states in group</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="text-center py-5">
+                            <div class="mb-3" style="font-size: 4rem; opacity: 0.3;">🔍</div>
+                            <h6>No State Groupings Found</h6>
+                            <p class="text-muted">
+                                We need more correlation data to identify similar state clusters.<br>
+                                Try generating more correlations first.
+                            </p>
+                            <a href="{% url 'admin:standards_standardcorrelation_changelist' %}" class="btn btn-outline-primary">
+                                Generate Correlations
+                            </a>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unique States -->
+    {% if unique_states %}
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">🎯 Unique States</h5>
+                    <small class="text-muted">Require custom content development</small>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        {% for state in unique_states %}
+                        <div class="col-md-3 mb-3">
+                            <div class="card border-warning">
+                                <div class="card-body text-center">
+                                    <h5 class="card-title">{{ state }}</h5>
+                                    <p class="text-muted mb-0">Custom content needed</p>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    <div class="alert alert-warning mt-3">
+                        <h6 class="alert-heading">⚠️ Development Strategy</h6>
+                        <p class="mb-0">
+                            These states have unique requirements that don't cluster with others. 
+                            Consider developing specialized content or conducting deeper analysis to find sub-clusters.
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Deployment Strategy -->
+    <div class="row mb-4">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">📋 Recommended Deployment Strategy</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <h6>🚀 Priority 1: Grouped States</h6>
+                            <ul class="list-unstyled">
+                                {% for group in groupings %}
+                                <li class="mb-2">
+                                    <span class="badge bg-success me-2">{{ group.state_count }} states</span>
+                                    <strong>{{ group.region }} Block</strong>
+                                    <small class="text-muted d-block">
+                                        ROI: {{ group.similarity_percentage }}% efficiency gain
+                                    </small>
+                                </li>
+                                {% empty %}
+                                <li class="text-muted">No grouped states identified yet</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>🎯 Priority 2: Unique States</h6>
+                            <ul class="list-unstyled">
+                                {% for state in unique_states %}
+                                <li class="mb-2">
+                                    <span class="badge bg-warning me-2">1 state</span>
+                                    <strong>{{ state }}</strong>
+                                    <small class="text-muted d-block">Custom development required</small>
+                                </li>
+                                {% empty %}
+                                <li class="text-muted">All states are grouped efficiently</li>
+                                {% endfor %}
+                            </ul>
+                        </div>
+                    </div>
+
+                    {% if groupings %}
+                    <div class="mt-4 p-3 bg-light rounded">
+                        <h6>💡 Efficiency Summary</h6>
+                        <p class="mb-0">
+                            By focusing on grouped states first, you can achieve 
+                            <strong>{{ groupings|length }}x efficiency</strong> in content development.
+                            Each regional block allows you to build once and deploy to multiple states.
+                        </p>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Regional Analysis Chart -->
+    <div class="row">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">📊 Regional Distribution</h5>
+                </div>
+                <div class="card-body">
+                    <canvas id="regionalChart" height="100"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Regional Distribution Chart
+document.addEventListener('DOMContentLoaded', function() {
+    const ctx = document.getElementById('regionalChart').getContext('2d');
+    
+    // Prepare data from Django context
+    const groupings = {{ groupings|safe }};
+    const uniqueStates = {{ unique_states|length }};
+    
+    const regionData = {};
+    const regionColors = {
+        'Northeast': '#007bff',
+        'Southeast': '#28a745', 
+        'Midwest': '#ffc107',
+        'Southwest': '#fd7e14',
+        'West': '#6f42c1',
+        'Pacific': '#20c997',
+        'Mixed': '#6c757d'
+    };
+    
+    // Process groupings data
+    groupings.forEach(group => {
+        if (regionData[group.region]) {
+            regionData[group.region] += group.state_count;
+        } else {
+            regionData[group.region] = group.state_count;
+        }
+    });
+    
+    // Add unique states as separate category
+    if (uniqueStates > 0) {
+        regionData['Unique States'] = uniqueStates;
+        regionColors['Unique States'] = '#dc3545';
+    }
+    
+    const labels = Object.keys(regionData);
+    const data = Object.values(regionData);
+    const backgroundColor = labels.map(label => regionColors[label] || '#6c757d');
+    
+    new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: labels,
+            datasets: [{
+                data: data,
+                backgroundColor: backgroundColor,
+                borderWidth: 2,
+                borderColor: '#fff'
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    position: 'bottom',
+                    labels: {
+                        padding: 20,
+                        usePointStyle: true
+                    }
+                },
+                tooltip: {
+                    callbacks: {
+                        label: function(context) {
+                            const label = context.label || '';
+                            const value = context.parsed || 0;
+                            const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                            const percentage = ((value / total) * 100).toFixed(1);
+                            return `${label}: ${value} states (${percentage}%)`;
+                        }
+                    }
+                }
+            }
+        }
+    });
+});
+</script>
+{% endblock %}

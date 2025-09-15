@@ -1,0 +1,234 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block title %}Generate Template{% endblock %}
+
+{% block extrahead %}
+<link rel="stylesheet" href="{% static 'admin/css/forms.css' %}">
+<style>
+    .template-container {
+        max-width: 600px;
+        margin: 0 auto;
+    }
+    .template-form {
+        background-color: var(--body-bg);
+        color: var(--body-fg);
+        padding: 30px;
+        border: 1px solid var(--hairline-color);
+        border-radius: 5px;
+        margin: 20px 0;
+    }
+    .form-row {
+        margin-bottom: 20px;
+    }
+    .form-row label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+        color: var(--body-fg);
+    }
+    .help-text {
+        font-size: 12px;
+        color: var(--body-quiet-color);
+        margin-top: 5px;
+    }
+    .radio-group {
+        display: flex;
+        gap: 20px;
+        margin: 10px 0;
+    }
+    .radio-option {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+    }
+    .radio-option label {
+        color: var(--body-fg);
+        margin-bottom: 0;
+    }
+    .template-info {
+        background-color: var(--darkened-bg);
+        color: var(--body-fg);
+        padding: 20px;
+        border-radius: 5px;
+        margin: 20px 0;
+        border: 1px solid var(--hairline-color);
+    }
+    .template-info h3, .template-info h4 {
+        color: var(--body-fg);
+    }
+    .field-list {
+        columns: 2;
+        column-gap: 30px;
+        margin: 15px 0;
+    }
+    .field-list li {
+        margin-bottom: 5px;
+        break-inside: avoid;
+        color: var(--body-fg);
+    }
+    .required {
+        color: var(--error-fg);
+        font-weight: bold;
+    }
+    .recommended {
+        color: #fd7e14;
+        font-weight: bold;
+    }
+    .optional {
+        color: #6c757d;
+    }
+    
+    /* Ensure form inputs are properly styled */
+    .template-form input[type="text"],
+    .template-form input[type="number"],
+    .template-form select {
+        background-color: var(--body-bg);
+        color: var(--body-fg);
+        border: 1px solid var(--border-color);
+    }
+    
+    /* Dark theme support fallback */
+    @media (prefers-color-scheme: dark) {
+        .template-form {
+            background-color: #2b2b2b;
+            color: #f8f9fa;
+        }
+        .template-info {
+            background-color: #1e1e1e;
+            color: #f8f9fa;
+        }
+        .help-text {
+            color: #aaa;
+        }
+        .field-list li {
+            color: #f8f9fa;
+        }
+        .template-form input[type="text"],
+        .template-form input[type="number"],
+        .template-form select {
+            background-color: #2b2b2b;
+            color: #f8f9fa;
+            border-color: #555;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="template-container">
+    <h1>Generate Sample Template</h1>
+    
+    <div class="template-info">
+        <h3>Template Information</h3>
+        <p>Generate a sample template file to help you format your standards data correctly. 
+        The template includes all required and optional fields with proper formatting examples.</p>
+        
+        <h4>Standard Fields</h4>
+        <div style="background-color: var(--selected-bg, #e6f3ff); padding: 15px; border-radius: 5px; margin: 15px 0;">
+            <h5 style="margin-top: 0; color: var(--body-fg, #333);">📍 <strong>Required Fields</strong> (Must have for system to work)</h5>
+            <ul class="field-list">
+                <li><span class="required">state</span> - Two-letter state code (e.g., CA, TX) - <em>Must exist in system</em></li>
+                <li><span class="required">code</span> - Unique standard code - <em>Must be unique within each state</em></li>
+                <li><span class="required">description</span> - Standard description - <em>Primary content for RAG analysis and embeddings</em></li>
+            </ul>
+        </div>
+        
+        <div style="background-color: var(--body-bg, #f8f9fa); padding: 15px; border-radius: 5px; margin: 15px 0; border: 1px solid var(--hairline-color, #ddd);">
+            <h5 style="margin-top: 0; color: var(--body-fg, #333);">🎯 <strong>Recommended for Better Analysis</strong></h5>
+            <ul class="field-list">
+                <li><span class="recommended">title</span> - Standard title/name - <em>Display name (optional - varies by state)</em></li>
+                <li><span class="recommended">subject</span> - Subject area (Math, ELA, Science, etc.) - <em>Enables subject-specific analysis</em></li>
+                <li><span class="recommended">grade</span> - Grade level (K, 1, 2, ..., 12) - <em>Critical for bell curve and coverage analysis</em></li>
+                <li><span class="recommended">domain</span> - Domain or category - <em>Helps find common educational threads</em></li>
+                <li><span class="recommended">keywords</span> - Comma-separated keywords - <em>Improves semantic matching</em></li>
+            </ul>
+        </div>
+        
+        <div style="background-color: var(--body-bg, #f8f9fa); padding: 15px; border-radius: 5px; margin: 15px 0;">
+            <h5 style="margin-top: 0; color: var(--body-fg, #333);">➕ <strong>Optional Enhancement Fields</strong></h5>
+            <ul class="field-list">
+                <li><span class="optional">cluster</span> - Cluster or subcategory - <em>Additional categorization</em></li>
+                <li><span class="optional">skills</span> - Comma-separated skills - <em>Skill-based analysis</em></li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="template-form">
+        <form method="post">
+            {% csrf_token %}
+            
+            <div class="form-row">
+                <label>Template Format:</label>
+                <div class="radio-group">
+                    {% for choice in form.format %}
+                        <div class="radio-option">
+                            {{ choice.tag }}
+                            <label for="{{ choice.id_for_label }}">{{ choice.choice_label }}</label>
+                        </div>
+                    {% endfor %}
+                </div>
+                <div class="help-text">{{ form.format.help_text }}</div>
+            </div>
+            
+            <div class="form-row">
+                <label for="{{ form.include_sample_data.id_for_label }}">
+                    {{ form.include_sample_data }}
+                    {{ form.include_sample_data.label }}
+                </label>
+                <div class="help-text">{{ form.include_sample_data.help_text }}</div>
+            </div>
+            
+            <div class="form-row">
+                <label for="{{ form.states_count.id_for_label }}">{{ form.states_count.label }}:</label>
+                {{ form.states_count }}
+                <div class="help-text">{{ form.states_count.help_text }}</div>
+            </div>
+            
+            <div class="submit-row">
+                <input type="submit" value="Generate Template" class="default">
+                <a href="{% url 'admin_bulk_upload' %}" class="button">Back to Upload</a>
+            </div>
+        </form>
+    </div>
+    
+    <div class="template-info">
+        <h3>Usage Instructions</h3>
+        <ol>
+            <li><strong>Download Template:</strong> Click "Generate Template" to download a sample file</li>
+            <li><strong>Fill Your Data:</strong> Replace sample data with your actual standards</li>
+            <li><strong>Validate Format:</strong> Ensure all <span class="required">required fields</span> are filled</li>
+            <li><strong>Upload File:</strong> Use the bulk upload tool to import your data</li>
+        </ol>
+        
+        <div style="background-color: var(--selected-bg, #fff3cd); padding: 15px; border-radius: 5px; margin: 15px 0; border-left: 4px solid #ffc107;">
+            <h4 style="margin-top: 0; color: var(--body-fg);">⚠️ Important for RAG Analysis</h4>
+            <ul>
+                <li><strong>State codes</strong> must match existing states in the system (CA, TX, NY, etc.)</li>
+                <li><strong>Description field</strong> is crucial - this is the primary content analyzed for semantic similarity</li>
+                <li><strong>Title field</strong> is optional - if missing, system uses code + description for display</li>
+                <li><strong>Grade levels</strong> are essential for bell curve analysis and coverage reports</li>
+                <li><strong>Subject areas</strong> enable subject-specific RAG operations</li>
+            </ul>
+        </div>
+        
+        <h4>CSV Format Notes</h4>
+        <ul>
+            <li>Title field can be left empty - system will generate display names from code + description</li>
+            <li>Use commas to separate multiple keywords or skills</li>
+            <li>Wrap text containing commas in quotes</li>
+            <li>Grade levels can be single (3) or ranges (3-5)</li>
+            <li>State codes must be exactly 2 uppercase letters</li>
+        </ul>
+        
+        <h4>JSON Format Notes</h4>
+        <ul>
+            <li>Title field can be null or omitted - system will generate display names automatically</li>
+            <li>Keywords and skills should be arrays of strings</li>
+            <li>All text fields should be properly quoted</li>
+            <li>Ensure valid JSON syntax (use a JSON validator)</li>
+            <li>Files can be flat arrays or organized by state/subject</li>
+        </ul>
+    </div>
+</div>
+{% endblock %}

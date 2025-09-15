@@ -1,0 +1,172 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block extrahead %}
+    {{ block.super }}
+    <style>
+        .dashboard-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            text-decoration: none;
+            display: block;
+            transition: transform 0.2s;
+        }
+        .dashboard-card:hover {
+            transform: translateY(-2px);
+            color: white;
+            text-decoration: none;
+        }
+        .dashboard-card h3 {
+            margin: 0 0 10px 0;
+            color: white;
+        }
+        .dashboard-links {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .dashboard-link {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 15px;
+            text-decoration: none;
+            color: #333;
+            transition: all 0.2s;
+        }
+        .dashboard-link:hover {
+            border-color: #667eea;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            color: #333;
+            text-decoration: none;
+        }
+        .dashboard-link h4 {
+            margin: 0 0 8px 0;
+            color: #667eea;
+        }
+    </style>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+    
+    <!-- Dashboard Quick Access -->
+    <a href="{% url 'dashboard:home' %}" class="dashboard-card">
+        <h3>📊 Educational Standards Dashboard</h3>
+        <p>Analyze curriculum coverage, discover state groupings, and explore topic intelligence across all 50 states.</p>
+        <strong>→ Open Dashboard</strong>
+    </a>
+    
+    <!-- Dashboard Links Grid -->
+    <div class="dashboard-links">
+        <a href="{% url 'dashboard:coverage' %}" class="dashboard-link">
+            <h4>🗺️ Coverage Map</h4>
+            <p>Upload curriculum and see state coverage analysis with quick wins</p>
+        </a>
+        <a href="{% url 'dashboard:groupings' %}" class="dashboard-link">
+            <h4>🏛️ State Groupings</h4>
+            <p>Discover similar state clusters for efficient content deployment</p>
+        </a>
+        <a href="{% url 'dashboard:topics' %}" class="dashboard-link">
+            <h4>🧠 Topic Intelligence</h4>
+            <p>Analyze topic prevalence and importance across all states</p>
+        </a>
+    </div>
+
+    <!-- Original Django Admin Content -->
+    {% if app_list %}
+        {% for app in app_list %}
+            <div class="app-{{ app.app_label }} module">
+                <table>
+                    <caption>
+                        <a href="{{ app.app_url }}" class="section" title="{% blocktranslate with name=app.name %}Models in the {{ name }} application{% endblocktranslate %}">{{ app.name }}</a>
+                    </caption>
+                    {% for model in app.models %}
+                        <tr class="model-{{ model.object_name|lower }}">
+                            {% if model.admin_url %}
+                                <th scope="row"><a href="{{ model.admin_url }}">{{ model.name }}</a></th>
+                            {% else %}
+                                <th scope="row">{{ model.name }}</th>
+                            {% endif %}
+
+                            {% if model.add_url %}
+                                <td><a href="{{ model.add_url }}" class="addlink">{% translate 'Add' %}</a></td>
+                            {% else %}
+                                <td>&nbsp;</td>
+                            {% endif %}
+
+                            {% if model.admin_url %}
+                                {% if model.view_only %}
+                                    <td><a href="{{ model.admin_url }}" class="viewlink">{% translate 'View' %}</a></td>
+                                {% else %}
+                                    <td><a href="{{ model.admin_url }}" class="changelink">{% translate 'Change' %}</a></td>
+                                {% endif %}
+                            {% else %}
+                                <td>&nbsp;</td>
+                            {% endif %}
+                        </tr>
+                    {% endfor %}
+                </table>
+            </div>
+        {% endfor %}
+    {% else %}
+        <p>{% translate "You don't have permission to view or edit anything." %}</p>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block sidebar %}
+<div id="content-related">
+    <div class="module" id="recent-actions-module">
+        <h2>{% translate 'Quick Links' %}</h2>
+        <ul class="actionlist">
+            <li class="addlink">
+                <a href="{% url 'dashboard:home' %}">📊 Dashboard Home</a>
+            </li>
+            <li class="addlink">
+                <a href="{% url 'admin:standards_standard_changelist' %}">📚 View All Standards</a>
+            </li>
+            <li class="addlink">
+                <a href="{% url 'admin:standards_standardcorrelation_changelist' %}">🔗 View Correlations</a>
+            </li>
+            <li class="addlink">
+                <a href="{% url 'admin_generate_correlations' %}">⚡ Generate Correlations</a>
+            </li>
+            <li class="addlink">
+                <a href="{% url 'admin_bulk_upload' %}">📁 Bulk Upload Standards</a>
+            </li>
+        </ul>
+    </div>
+    
+    {% load log %}
+    {% get_admin_log 10 as admin_log for_user user %}
+    {% if admin_log %}
+    <div class="module" id="recent-actions-module">
+        <h2>{% translate 'Recent actions' %}</h2>
+        <h3>{% translate 'My actions' %}</h3>
+            {% for entry in admin_log %}
+            <ul class="actionlist">
+                <li class="{% if entry.is_addition %}addlink{% endif %}{% if entry.is_change %}changelink{% endif %}{% if entry.is_deletion %}deletelink{% endif %}">
+                    {% if entry.is_deletion or not entry.get_admin_url %}
+                        {{ entry.object_repr }}
+                    {% else %}
+                        <a href="{{ entry.get_admin_url }}">{{ entry.object_repr }}</a>
+                    {% endif %}
+                    <br>
+                    {% if entry.content_type %}
+                        <span class="mini quiet">{% filter capfirst %}{{ entry.content_type.name }}{% endfilter %}</span>
+                    {% else %}
+                        <span class="mini quiet">{% translate 'Unknown content' %}</span>
+                    {% endif %}
+                </li>
+            </ul>
+            {% endfor %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

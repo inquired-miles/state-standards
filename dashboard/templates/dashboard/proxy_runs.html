@@ -1,0 +1,780 @@
+{% extends "dashboard/base.html" %}
+
+{% block title %}Proxy Run Analysis · Dashboard{% endblock %}
+
+{% block content %}
+<div class="dashboard-header">
+  <div class="container">
+    <h1 class="display-6 mb-0">Proxy Run Analysis</h1>
+    <p class="mb-0">View coverage details for a specific run. Filter by grade and state, and see covered vs not covered standards.</p>
+  </div>
+</div>
+
+<div class="container">
+  <div class="row g-3 align-items-end mb-3">
+    <div class="col-md-4">
+      <label class="form-label">Select Run</label>
+      <select id="runSelect" class="form-select" aria-describedby="runSelectHelp">
+        <option value="">Choose a run…</option>
+        {% for r in runs %}
+          <option value="{{ r.run_id }}" {% if selected_run and r.run_id == selected_run.run_id %}selected{% endif %}>
+            {{ r.name }} ({{ r.get_run_type_display }}) — {{ r.started_at|date:"Y-m-d H:i" }}
+          </option>
+        {% endfor %}
+      </select>
+      <div id="runSelectHelp" class="form-text">Select a proxy generation run to analyze</div>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="gradesInput">Grades (comma-separated)</label>
+      <input id="gradesInput" type="text" class="form-control" placeholder="e.g., 3 or 3,4" aria-describedby="gradesInputHelp" />
+      <div id="gradesInputHelp" class="form-text">Filter by specific grade levels</div>
+    </div>
+    <div class="col-md-3">
+      <label class="form-label" for="stateSelect">State</label>
+      <select id="stateSelect" class="form-select" aria-describedby="stateSelectHelp">
+        <option value="">All states</option>
+      </select>
+      <div id="stateSelectHelp" class="form-text">Filter by specific state</div>
+    </div>
+    <div class="col-md-2 d-grid">
+      <button id="loadBtn" class="btn btn-primary" type="button">
+        <span id="loadSpinner" class="spinner-border spinner-border-sm me-2" style="display: none;" aria-hidden="true"></span>
+        <span id="loadText">Load Coverage</span>
+      </button>
+    </div>
+  </div>
+
+  <div id="status" class="alert alert-secondary d-none" role="alert"></div>
+
+  <!-- Coverage Chart -->
+  <div class="card mb-3">
+    <div class="card-body">
+      <h5 class="card-title">State Coverage Visualization</h5>
+      <div class="row">
+        <div class="col-lg-8">
+          <div style="position: relative; height: 400px;" class="coverage-chart-container">
+            <canvas id="coverageChart" aria-label="State coverage visualization chart"></canvas>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="h-100 d-flex flex-column justify-content-center">
+            <div class="mb-3">
+              <h6>Coverage Summary</h6>
+              <div id="coverageSummary">
+                <p class="mb-1"><span class="badge bg-success">High (≥80%)</span>: <span id="highCoverage">0</span> states</p>
+                <p class="mb-1"><span class="badge bg-warning">Medium (60-80%)</span>: <span id="mediumCoverage">0</span> states</p>
+                <p class="mb-0"><span class="badge bg-danger">Low (<60%)</span>: <span id="lowCoverage">0</span> states</p>
+              </div>
+            </div>
+            <div>
+              <h6>Statistics</h6>
+              <p class="mb-1">Average Coverage: <strong id="avgCoverage">0%</strong></p>
+              <p class="mb-0">Total States: <strong id="totalStates">0</strong></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="card-title mb-0">Per-State Coverage Table</h5>
+        <input id="tableFilter" type="search" class="form-control" style="max-width: 240px" placeholder="Filter table…" aria-label="Filter coverage table" />
+      </div>
+      <div class="table-responsive">
+        <table id="coverageTable" class="table table-hover align-middle" role="table" aria-label="State coverage breakdown">
+          <thead>
+            <tr>
+              <th scope="col">State</th>
+              <th scope="col">Covered</th>
+              <th scope="col">Total</th>
+              <th scope="col">Coverage %</th>
+              <th scope="col">Actions</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="card mt-3">
+    <div class="card-body">
+      <h5 class="card-title">Proxy Standards (with covered standards)</h5>
+      <div id="proxyList"></div>
+    </div>
+  </div>
+
+  <div class="card mt-3">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-2">
+        <h5 class="card-title mb-0">Standards Not Covered (Filtered View)</h5>
+      </div>
+      <div class="table-responsive">
+        <table id="notCoveredTable" class="table table-hover align-middle" role="table" aria-label="Standards not covered">
+          <thead>
+            <tr>
+              <th scope="col">State</th>
+              <th scope="col">Code</th>
+              <th scope="col">Description</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  .coverage-chart-container {
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  
+  .form-text {
+    font-size: 0.875rem;
+    color: #6c757d;
+  }
+  
+  @media (max-width: 768px) {
+    .coverage-chart-container {
+      height: 300px !important;
+    }
+    
+    .col-md-4, .col-md-3, .col-md-2 {
+      margin-bottom: 1rem;
+    }
+    
+    .table-responsive {
+      font-size: 0.875rem;
+    }
+  }
+  
+  .proxy-standard-card {
+    transition: box-shadow 0.2s ease;
+  }
+  
+  .proxy-standard-card:hover {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+  }
+  
+  .badge {
+    font-size: 0.75rem;
+  }
+  
+  .coverage-summary-item {
+    padding: 0.5rem;
+    border-radius: 6px;
+    margin-bottom: 0.5rem;
+  }
+</style>
+{% endblock %}
+
+{% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+(function(){
+  const runSelect = document.getElementById('runSelect');
+  const gradesInput = document.getElementById('gradesInput');
+  const stateSelect = document.getElementById('stateSelect');
+  const loadBtn = document.getElementById('loadBtn');
+  const statusDiv = document.getElementById('status');
+  const table = document.getElementById('coverageTable').querySelector('tbody');
+  const tableFilter = document.getElementById('tableFilter');
+  
+  // Debug: Check if all elements exist
+  console.log('DOM elements found:', {
+    runSelect: !!runSelect,
+    gradesInput: !!gradesInput, 
+    stateSelect: !!stateSelect,
+    loadBtn: !!loadBtn,
+    statusDiv: !!statusDiv,
+    table: !!table,
+    tableFilter: !!tableFilter,
+    proxyList: !!document.getElementById('proxyList'),
+    notCoveredTable: !!document.getElementById('notCoveredTable')
+  });
+  
+  // Chart variables
+  let coverageChart = null;
+  const ctx = document.getElementById('coverageChart').getContext('2d');
+
+  function showStatus(text, cls) {
+    statusDiv.className = 'alert ' + (cls || 'alert-info');
+    statusDiv.textContent = text;
+    statusDiv.classList.remove('d-none');
+    // Announce status changes to screen readers
+    statusDiv.setAttribute('aria-live', 'polite');
+  }
+
+  function clearStatus(){ statusDiv.classList.add('d-none'); }
+
+  function getQueryParam(name) {
+    const urlParams = new URLSearchParams(window.location.search);
+    return urlParams.get(name);
+  }
+
+  function setQueryParam(key, value){
+    const url = new URL(window.location);
+    if (value) url.searchParams.set(key, value); else url.searchParams.delete(key);
+    window.history.replaceState({}, '', url);
+  }
+
+  async function fetchCoverage(runId, grades, state){
+    const params = new URLSearchParams({ run_id: runId });
+    if (grades) params.set('grades', grades);
+    if (state) params.set('state', state);
+    const url = `{% url 'dashboard:proxy_run_coverage_api' %}?` + params.toString();
+    
+    try {
+      const resp = await fetch(url);
+      const data = await resp.json();
+      
+      console.log('Coverage API response:', { status: resp.status, success: data.success, keys: Object.keys(data) });
+      
+      if (!resp.ok) throw new Error(data.error || 'Request failed');
+      
+      // Handle nested data structure like in the proxy API
+      const actualData = data.data || data;
+      console.log('Coverage data keys:', Object.keys(actualData));
+      
+      return actualData;
+    } catch (error) {
+      console.error('Error in fetchCoverage:', error);
+      throw error;
+    }
+  }
+
+  function renderStateSelect(states){
+    const current = stateSelect.value;
+    stateSelect.innerHTML = '<option value="">All states</option>';
+    states.forEach(code => {
+      const opt = document.createElement('option');
+      opt.value = code; opt.textContent = code;
+      stateSelect.appendChild(opt);
+    });
+    if (current) stateSelect.value = current;
+  }
+
+  function renderTable(states){
+    table.innerHTML = '';
+    if (!Array.isArray(states)) {
+      console.warn('renderTable called with non-array states:', states);
+      return;
+    }
+    states.forEach(row => {
+      const tr = document.createElement('tr');
+      tr.dataset.state = row.state;
+      tr.innerHTML = `
+        <td><strong>${row.state}</strong></td>
+        <td>${row.covered_count}</td>
+        <td>${row.total_count}</td>
+        <td>${(row.coverage_percentage || 0).toFixed(1)}%</td>
+        <td><button class="btn btn-sm btn-outline-secondary" data-action="toggle" type="button" aria-expanded="false" aria-controls="details-${row.state}">Details</button></td>
+      `;
+      const details = document.createElement('tr');
+      details.className = 'd-none';
+      details.dataset.detailsFor = row.state;
+      details.id = `details-${row.state}`;
+      details.setAttribute('aria-hidden', 'true');
+      details.innerHTML = `
+        <td colspan="5">
+          <div class="row">
+            <div class="col-md-6">
+              <h6>Covered Standards (${(row.covered || []).length})</h6>
+              <div class="border rounded p-2" style="max-height: 240px; overflow:auto;">
+                ${(() => {
+                  // Group standards by state
+                  const stateGroups = {};
+                  (row.covered || []).forEach(s => {
+                    const stateCode = s.state__code || 'Unknown';
+                    if (!stateGroups[stateCode]) {
+                      stateGroups[stateCode] = [];
+                    }
+                    stateGroups[stateCode].push(s);
+                  });
+                  
+                  // Get state name mapping
+                  const stateNames = {
+                    'CA': 'California', 'TX': 'Texas', 'NY': 'New York', 'FL': 'Florida',
+                    'IL': 'Illinois', 'PA': 'Pennsylvania', 'OH': 'Ohio', 'GA': 'Georgia',
+                    'NC': 'North Carolina', 'MI': 'Michigan', 'NJ': 'New Jersey', 'VA': 'Virginia',
+                    'WA': 'Washington', 'AZ': 'Arizona', 'MA': 'Massachusetts', 'TN': 'Tennessee',
+                    'IN': 'Indiana', 'MO': 'Missouri', 'MD': 'Maryland', 'WI': 'Wisconsin',
+                    'CO': 'Colorado', 'MN': 'Minnesota', 'SC': 'South Carolina', 'AL': 'Alabama',
+                    'LA': 'Louisiana', 'KY': 'Kentucky', 'OR': 'Oregon', 'OK': 'Oklahoma',
+                    'CT': 'Connecticut', 'UT': 'Utah', 'IA': 'Iowa', 'NV': 'Nevada',
+                    'AR': 'Arkansas', 'MS': 'Mississippi', 'KS': 'Kansas', 'NM': 'New Mexico',
+                    'NE': 'Nebraska', 'WV': 'West Virginia', 'ID': 'Idaho', 'HI': 'Hawaii',
+                    'NH': 'New Hampshire', 'ME': 'Maine', 'MT': 'Montana', 'RI': 'Rhode Island',
+                    'DE': 'Delaware', 'SD': 'South Dakota', 'ND': 'North Dakota', 'AK': 'Alaska',
+                    'VT': 'Vermont', 'WY': 'Wyoming'
+                  };
+                  
+                  // Sort states alphabetically and render
+                  const sortedStates = Object.keys(stateGroups).sort();
+                  if (sortedStates.length === 0) {
+                    return '<em>None</em>';
+                  }
+                  
+                  return sortedStates.map(stateCode => {
+                    const stateName = stateNames[stateCode] || stateCode;
+                    const standards = stateGroups[stateCode];
+                    return `
+                      <div class="mb-2">
+                        <div class="fw-bold text-primary small">${stateName}</div>
+                        ${standards.map(s => `
+                          <div class="mb-1 ms-2">
+                            <div><code>${s.state__code}</code> · <code>${s.code}</code> — <strong>${s.title || ''}</strong></div>
+                            <div class="text-muted small">${s.description || ''}</div>
+                            <div class="text-muted small">Covered by: ${(s.proxy_titles || []).join(', ') || '—'}</div>
+                          </div>
+                        `).join('')}
+                      </div>
+                    `;
+                  }).join('');
+                })()}
+              </div>
+            </div>
+            <div class="col-md-6">
+              <h6>Not Covered (${(row.not_covered || []).length})</h6>
+              <div class="border rounded p-2" style="max-height: 240px; overflow:auto;">
+                ${(row.not_covered || []).map(s => `<div class="mb-1"><div><code>${s.state__code}</code> · <code>${s.code}</code> — <strong>${s.title || ''}</strong></div><div class="text-muted small">${s.description || ''}</div></div>`).join('') || '<em>None</em>'}
+              </div>
+            </div>
+          </div>
+        </td>
+      `;
+      table.appendChild(tr);
+      table.appendChild(details);
+    });
+  }
+
+  function attachRowHandlers(){
+    table.querySelectorAll('button[data-action="toggle"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const tr = btn.closest('tr');
+        const state = tr.dataset.state;
+        const details = table.querySelector(`tr[data-details-for="${state}"]`);
+        if (details) {
+          const isHidden = details.classList.contains('d-none');
+          details.classList.toggle('d-none');
+          
+          // Update ARIA attributes
+          btn.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+          details.setAttribute('aria-hidden', isHidden ? 'false' : 'true');
+          btn.textContent = isHidden ? 'Hide' : 'Details';
+        }
+      });
+    });
+  }
+
+  function applyTableFilter(){
+    const q = (tableFilter.value || '').toLowerCase();
+    table.querySelectorAll('tr').forEach(tr => {
+      if (tr.dataset.state) {
+        const state = tr.dataset.state.toLowerCase();
+        tr.style.display = state.includes(q) ? '' : 'none';
+        const details = table.querySelector(`tr[data-details-for="${tr.dataset.state}"]`);
+        if (details) details.style.display = tr.style.display;
+      }
+    });
+  }
+
+  function createCoverageChart(states){
+    // Destroy existing chart if it exists
+    if (coverageChart) {
+      coverageChart.destroy();
+    }
+
+    // Sort states by coverage percentage for better visualization
+    const sortedStates = [...(states || [])].sort((a, b) => (b.coverage_percentage || 0) - (a.coverage_percentage || 0));
+    
+    // Prepare data
+    const labels = sortedStates.map(s => s.state);
+    const data = sortedStates.map(s => s.coverage_percentage || 0);
+    
+    // Color coding based on coverage levels
+    const backgroundColors = data.map(coverage => {
+      if (coverage >= 80) return '#198754'; // Green for high coverage
+      if (coverage >= 60) return '#ffc107'; // Yellow for medium coverage
+      return '#dc3545'; // Red for low coverage
+    });
+
+    coverageChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Coverage %',
+          data: data,
+          backgroundColor: backgroundColors,
+          borderColor: backgroundColors,
+          borderWidth: 1
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          title: {
+            display: true,
+            text: 'State Coverage Percentages',
+            font: {
+              size: 16
+            }
+          },
+          legend: {
+            display: false
+          }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            max: 100,
+            title: {
+              display: true,
+              text: 'Coverage Percentage'
+            },
+            ticks: {
+              callback: function(value) {
+                return value + '%';
+              }
+            }
+          },
+          x: {
+            title: {
+              display: true,
+              text: 'States'
+            }
+          }
+        },
+        interaction: {
+          intersect: false,
+          mode: 'index'
+        },
+        onHover: (event, elements) => {
+          event.native.target.style.cursor = elements.length > 0 ? 'pointer' : 'default';
+        },
+        onClick: (event, elements) => {
+          if (elements.length > 0) {
+            const index = elements[0].index;
+            const stateCode = sortedStates[index].state;
+            // Scroll to the state row in the table
+            const stateRow = table.querySelector(`tr[data-state="${stateCode}"]`);
+            if (stateRow) {
+              stateRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              stateRow.style.backgroundColor = '#fff3cd';
+              setTimeout(() => {
+                stateRow.style.backgroundColor = '';
+              }, 2000);
+            }
+          }
+        }
+      }
+    });
+  }
+
+  function updateCoverageSummary(states){
+    let high = 0, medium = 0, low = 0;
+    let totalCoverage = 0;
+
+    if (!Array.isArray(states)) {
+      console.warn('updateCoverageSummary called with non-array states:', states);
+      states = [];
+    }
+
+    states.forEach(state => {
+      const coverage = state.coverage_percentage || 0;
+      totalCoverage += coverage;
+      
+      if (coverage >= 80) high++;
+      else if (coverage >= 60) medium++;
+      else low++;
+    });
+
+    const avgCoverage = states.length > 0 ? (totalCoverage / states.length).toFixed(1) : 0;
+
+    // Update summary elements
+    document.getElementById('highCoverage').textContent = high;
+    document.getElementById('mediumCoverage').textContent = medium;
+    document.getElementById('lowCoverage').textContent = low;
+    document.getElementById('avgCoverage').textContent = avgCoverage + '%';
+    document.getElementById('totalStates').textContent = states.length;
+  }
+
+  async function loadCoverage(){
+    const runId = runSelect.value || getQueryParam('run_id');
+    if (!runId) { showStatus('Select a run to view coverage', 'alert-warning'); return; }
+    
+    // Show loading state
+    loadBtn.disabled = true;
+    document.getElementById('loadSpinner').style.display = 'inline-block';
+    document.getElementById('loadText').textContent = 'Loading...';
+    clearStatus();
+    setQueryParam('run_id', runId);
+    
+    try {
+      showStatus('Loading coverage…', 'alert-secondary');
+      const grades = gradesInput.value.trim();
+      const state = stateSelect.value;
+      const data = await fetchCoverage(runId, grades, state);
+      const stateCodes = (data.states || []).map(s => s.state);
+      renderStateSelect(stateCodes);
+      renderTable(data.states || []);
+      attachRowHandlers();
+      applyTableFilter();
+      
+      // Create chart and update summary
+      createCoverageChart(data.states || []);
+      updateCoverageSummary(data.states || []);
+      
+      showStatus(`Loaded ${(data.states || []).length} state rows`, 'alert-success');
+
+      // Also fetch proxies detail
+      await loadProxies();
+    } catch (e) {
+      console.error('Error loading coverage:', e);
+      showStatus('Error: ' + e.message, 'alert-danger');
+    } finally {
+      // Reset loading state
+      loadBtn.disabled = false;
+      document.getElementById('loadSpinner').style.display = 'none';
+      document.getElementById('loadText').textContent = 'Load Coverage';
+    }
+  }
+
+  async function loadProxies(){
+    const runId = runSelect.value || getQueryParam('run_id');
+    if (!runId) {
+      console.warn('No run ID available for loading proxies');
+      return;
+    }
+    
+    console.log('Loading proxies for run ID:', runId);
+    const grades = gradesInput.value.trim();
+    const state = stateSelect.value;
+    const params = new URLSearchParams({ run_id: runId });
+    if (grades) params.set('grades', grades);
+    if (state) params.set('state', state);
+    const url = `{% url 'dashboard:proxy_run_proxies_api' %}?` + params.toString();
+    
+    try {
+      const resp = await fetch(url);
+      const data = await resp.json();
+      
+      console.log('Proxy API response:', { status: resp.status, success: data.success, keys: Object.keys(data) });
+      
+      if (!resp.ok) {
+        throw new Error(data.error || `HTTP ${resp.status}: Request failed`);
+      }
+      
+      if (!data.success) {
+        throw new Error(data.error || 'API returned success=false');
+      }
+      
+      // Fix: The actual data is nested in data.data
+      const actualData = data.data || data;
+      
+      console.log('Processing proxy data:', { 
+        proxies: actualData.proxies?.length, 
+        not_covered: actualData.not_covered?.length,
+        standards_in_scope: actualData.standards_in_scope_count 
+      });
+      
+      // Debug: Log the actual data structure
+      if (actualData.proxies && actualData.proxies.length > 0) {
+        console.log('First proxy structure:', Object.keys(actualData.proxies[0]));
+        console.log('First proxy data:', actualData.proxies[0]);
+      }
+      if (actualData.not_covered && actualData.not_covered.length > 0) {
+        console.log('First not_covered structure:', Object.keys(actualData.not_covered[0]));
+        console.log('First not_covered data:', actualData.not_covered[0]);
+      }
+      
+      // Standards in scope
+      // Populate not covered table
+      const ncBody = document.querySelector('#notCoveredTable tbody');
+    ncBody.innerHTML = '';
+    (actualData.not_covered || []).forEach(s => {
+      const tr = document.createElement('tr');
+      const description = s.description || s.title || 'No description available';
+      const stateCode = s.state__code || s.state_code || s.state || '';
+      tr.innerHTML = `
+        <td><span class="badge bg-light text-dark">${stateCode}</span></td>
+        <td><code class="text-primary">${s.code || ''}</code></td>
+        <td class="small">${description}</td>
+      `;
+      ncBody.appendChild(tr);
+    });
+    // Proxies
+    const proxyList = document.getElementById('proxyList');
+    proxyList.innerHTML = '';
+    (actualData.proxies || []).forEach(p => {
+      const card = document.createElement('div');
+      card.className = 'mb-3';
+      card.innerHTML = `
+        <div class="border rounded p-3 proxy-standard-card">
+          <div class="d-flex justify-content-between align-items-center">
+            <div>
+              <div class="d-flex align-items-center gap-2 mb-1">
+                <strong>${p.title || p.proxy_id}</strong>
+                ${(p.states_in_scope || 0) > 1 ? `<span class="badge bg-success">Multi-State (${p.states_in_scope || 0} states)</span>` : ''}
+                ${(p.states_in_scope || 0) === 1 ? `<span class="badge bg-warning text-dark">State Specific: ${(() => {
+                  // Get the state name from the covered standards
+                  const stateNames = {
+                    'CA': 'California', 'TX': 'Texas', 'NY': 'New York', 'FL': 'Florida',
+                    'IL': 'Illinois', 'PA': 'Pennsylvania', 'OH': 'Ohio', 'GA': 'Georgia',
+                    'NC': 'North Carolina', 'MI': 'Michigan', 'NJ': 'New Jersey', 'VA': 'Virginia',
+                    'WA': 'Washington', 'AZ': 'Arizona', 'MA': 'Massachusetts', 'TN': 'Tennessee',
+                    'IN': 'Indiana', 'MO': 'Missouri', 'MD': 'Maryland', 'WI': 'Wisconsin',
+                    'CO': 'Colorado', 'MN': 'Minnesota', 'SC': 'South Carolina', 'AL': 'Alabama',
+                    'LA': 'Louisiana', 'KY': 'Kentucky', 'OR': 'Oregon', 'OK': 'Oklahoma',
+                    'CT': 'Connecticut', 'UT': 'Utah', 'IA': 'Iowa', 'NV': 'Nevada',
+                    'AR': 'Arkansas', 'MS': 'Mississippi', 'KS': 'Kansas', 'NM': 'New Mexico',
+                    'NE': 'Nebraska', 'WV': 'West Virginia', 'ID': 'Idaho', 'HI': 'Hawaii',
+                    'NH': 'New Hampshire', 'ME': 'Maine', 'MT': 'Montana', 'RI': 'Rhode Island',
+                    'DE': 'Delaware', 'SD': 'South Dakota', 'ND': 'North Dakota', 'AK': 'Alaska',
+                    'VT': 'Vermont', 'WY': 'Wyoming'
+                  };
+                  if (p.covered && p.covered.length > 0) {
+                    const stateCode = p.covered[0].state__code || p.covered[0].state_code || p.covered[0].state;
+                    return stateNames[stateCode] || stateCode;
+                  }
+                  return 'Unknown';
+                })()} </span>` : ''}
+              </div>
+              <div class="text-muted small">Proxy ID: ${p.proxy_id} · States covered (overall): ${p.coverage_count} · States in scope: ${p.states_in_scope || 0} · Standards in scope: ${p.covered_count}</div>
+              <div class="mt-1">${p.description || ''}</div>
+            </div>
+            <button class="btn btn-sm btn-outline-secondary" data-action="toggle-covered" type="button" aria-expanded="false">
+              <span class="toggle-text">Show Standards</span>
+            </button>
+          </div>
+          <div class="mt-2 d-none" data-covered-list>
+            ${(() => {
+              // Group standards by state
+              const stateGroups = {};
+              (p.covered || []).forEach(s => {
+                const stateCode = s.state__code || s.state_code || s.state || 'Unknown';
+                if (!stateGroups[stateCode]) {
+                  stateGroups[stateCode] = [];
+                }
+                stateGroups[stateCode].push(s);
+              });
+              
+              // Get state name mapping (simple mapping for common states)
+              const stateNames = {
+                'CA': 'California', 'TX': 'Texas', 'NY': 'New York', 'FL': 'Florida',
+                'IL': 'Illinois', 'PA': 'Pennsylvania', 'OH': 'Ohio', 'GA': 'Georgia',
+                'NC': 'North Carolina', 'MI': 'Michigan', 'NJ': 'New Jersey', 'VA': 'Virginia',
+                'WA': 'Washington', 'AZ': 'Arizona', 'MA': 'Massachusetts', 'TN': 'Tennessee',
+                'IN': 'Indiana', 'MO': 'Missouri', 'MD': 'Maryland', 'WI': 'Wisconsin',
+                'CO': 'Colorado', 'MN': 'Minnesota', 'SC': 'South Carolina', 'AL': 'Alabama',
+                'LA': 'Louisiana', 'KY': 'Kentucky', 'OR': 'Oregon', 'OK': 'Oklahoma',
+                'CT': 'Connecticut', 'UT': 'Utah', 'IA': 'Iowa', 'NV': 'Nevada',
+                'AR': 'Arkansas', 'MS': 'Mississippi', 'KS': 'Kansas', 'NM': 'New Mexico',
+                'NE': 'Nebraska', 'WV': 'West Virginia', 'ID': 'Idaho', 'HI': 'Hawaii',
+                'NH': 'New Hampshire', 'ME': 'Maine', 'MT': 'Montana', 'RI': 'Rhode Island',
+                'DE': 'Delaware', 'SD': 'South Dakota', 'ND': 'North Dakota', 'AK': 'Alaska',
+                'VT': 'Vermont', 'WY': 'Wyoming'
+              };
+              
+              // Sort states alphabetically and render
+              const sortedStates = Object.keys(stateGroups).sort();
+              if (sortedStates.length === 0) {
+                return '<em>No covered standards in scope</em>';
+              }
+              
+              return sortedStates.map(stateCode => {
+                const stateName = stateNames[stateCode] || stateCode;
+                const standards = stateGroups[stateCode];
+                return `
+                  <div class="mb-3">
+                    <div class="fw-bold text-primary mb-2">${stateName}</div>
+                    ${standards.map(s => `
+                      <div class="mb-2 ms-2">
+                        <div><code>${s.state__code || s.state_code || s.state}</code> · <code>${s.code}</code> — <strong>${s.title || ''}</strong></div>
+                        <div class="text-muted small">${s.description || ''}</div>
+                      </div>
+                    `).join('')}
+                  </div>
+                `;
+              }).join('');
+            })()}
+          </div>
+        </div>
+      `;
+      proxyList.appendChild(card);
+    });
+    proxyList.querySelectorAll('button[data-action="toggle-covered"]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const pane = btn.closest('.border').querySelector('[data-covered-list]');
+        const isHidden = pane.classList.contains('d-none');
+        pane.classList.toggle('d-none');
+        
+        // Update button text and aria-expanded
+        const toggleText = btn.querySelector('.toggle-text');
+        if (isHidden) {
+          toggleText.textContent = 'Hide Standards';
+          btn.setAttribute('aria-expanded', 'true');
+        } else {
+          toggleText.textContent = 'Show Standards';
+          btn.setAttribute('aria-expanded', 'false');
+        }
+      });
+    });
+    
+    } catch (error) {
+      console.error('Error in loadProxies():', error);
+      showStatus('Error loading proxy data: ' + error.message, 'alert-danger');
+      
+      // Clear existing content on error
+      const ncBody = document.querySelector('#notCoveredTable tbody');
+      const proxyList = document.getElementById('proxyList');
+      if (ncBody) ncBody.innerHTML = '<tr><td colspan="3" class="text-center text-muted">Error loading data</td></tr>';
+      if (proxyList) proxyList.innerHTML = '<div class="alert alert-danger">Error loading proxy data</div>';
+    }
+  }
+
+  // Initialize from URL param if present
+  const initialRun = getQueryParam('run_id');
+  if (initialRun) {
+    runSelect.value = initialRun;
+    
+    // If the run_id is not in the dropdown options, add it
+    const existingOption = runSelect.querySelector(`option[value="${initialRun}"]`);
+    if (!existingOption) {
+      const option = document.createElement('option');
+      option.value = initialRun;
+      option.textContent = `Run ${initialRun}`;
+      option.selected = true;
+      runSelect.appendChild(option);
+      console.log('Added missing run option:', initialRun);
+    }
+    
+    // Load the data immediately - try coverage first, fallback to proxies only
+    console.log('Initializing with run_id:', initialRun);
+    
+    loadCoverage().catch(coverageError => {
+      console.warn('Coverage loading failed, trying proxies only:', coverageError);
+      
+      // If coverage fails, try to load just the proxies data
+      return loadProxies().catch(proxiesError => {
+        console.error('Both coverage and proxies loading failed:', proxiesError);
+        showStatus('Error loading data for run ' + initialRun + ': ' + proxiesError.message, 'alert-danger');
+      });
+    });
+  }
+
+  loadBtn.addEventListener('click', loadCoverage);
+  tableFilter.addEventListener('input', applyTableFilter);
+})();
+</script>
+{% endblock %}

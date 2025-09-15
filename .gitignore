@@ -1,0 +1,118 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytestdebug.log
+
+# Django
+*.log
+local_settings.py
+
+# SQLite (Django default DB)
+db.sqlite3
+db.sqlite3-journal
+
+# Django collected/static/media outputs
+staticfiles/
+static/
+media/
+assets/
+
+# Environments / secrets
+.env
+.env.*
+*.env
+.envrc
+*.local
+*.secret
+*.pem
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# IDE/editor
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# macOS
+.DS_Store
+
+# Process IDs / runtimes
+*.pid
+celerybeat-schedule
+celerybeat.pid
+
+# Logs and temp
+logs/
+tmp/
+
+# Profiling
+*.prof
+
+# Project-specific: Claude artifacts
+.claude/
+/claude/
+Claude.md
+/md/
+
+.cursor/
+uploads/*
+*.log
+db.sqlite3

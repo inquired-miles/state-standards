@@ -1,0 +1,480 @@
+{% extends "admin/base_site.html" %}
+{% load i18n admin_urls static %}
+
+{% block title %}Correlation Generation Status{% endblock %}
+
+{% block extrastyle %}
+    {{ block.super }}
+    <style>
+        .status-container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .status-header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .job-title {
+            font-size: 1.5em;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        .job-details {
+            color: #666;
+            font-size: 0.9em;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            font-size: 1.1em;
+            margin: 10px 0;
+        }
+        .status-pending { background: #ffeaa7; color: #d68910; }
+        .status-analyzing { background: #a8dadc; color: #1d3557; }
+        .status-generating { background: #f1c40f; color: #8e44ad; }
+        .status-completed { background: #d1edcc; color: #27ae60; }
+        .status-failed { background: #fadbd8; color: #e74c3c; }
+        .status-cancelled { background: #d5d5d5; color: #7f8c8d; }
+        
+        .progress-section {
+            background: white;
+            border-radius: 8px;
+            padding: 25px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .progress-bar-container {
+            background: #f0f0f0;
+            border-radius: 10px;
+            height: 20px;
+            margin: 15px 0;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #45a049);
+            border-radius: 10px;
+            transition: width 0.3s ease;
+            position: relative;
+        }
+        .progress-text {
+            position: absolute;
+            width: 100%;
+            text-align: center;
+            line-height: 20px;
+            color: white;
+            font-weight: bold;
+            font-size: 0.8em;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            text-align: center;
+        }
+        .stat-number {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: #0066cc;
+            margin-bottom: 5px;
+        }
+        .stat-label {
+            font-size: 0.8em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .performance-section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .timing-info {
+            display: flex;
+            justify-content: space-between;
+            margin: 10px 0;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 5px;
+        }
+        .timing-label {
+            font-weight: bold;
+            color: #333;
+        }
+        .timing-value {
+            color: #666;
+        }
+        .error-section {
+            background: #fadbd8;
+            border: 1px solid #e74c3c;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+        .error-title {
+            font-weight: bold;
+            color: #c0392b;
+            margin-bottom: 10px;
+        }
+        .error-list {
+            max-height: 200px;
+            overflow-y: auto;
+            background: white;
+            padding: 10px;
+            border-radius: 3px;
+        }
+        .action-buttons {
+            text-align: center;
+            margin: 30px 0;
+        }
+        .btn {
+            display: inline-block;
+            padding: 10px 20px;
+            margin: 0 10px;
+            border: none;
+            border-radius: 5px;
+            text-decoration: none;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .btn-primary { background: #0066cc; color: white; }
+        .btn-danger { background: #dc3545; color: white; }
+        .btn-secondary { background: #6c757d; color: white; }
+        .auto-refresh {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 20px;
+            text-align: center;
+        }
+        .correlation-results {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .result-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin: 15px 0;
+        }
+    </style>
+{% endblock %}
+
+{% block extrahead %}
+    {{ block.super }}
+    <script>
+        let refreshInterval;
+        
+        function updateStatus() {
+            fetch('{% url "admin_correlation_status_api" correlation_job.id %}')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        console.error('Error fetching status:', data.error);
+                        return;
+                    }
+                    
+                    // Update status badge
+                    const statusBadge = document.getElementById('status-badge');
+                    if (statusBadge) {
+                        statusBadge.className = `status-badge status-${data.status}`;
+                        statusBadge.textContent = getStatusDisplay(data.status);
+                    }
+                    
+                    // Update progress bar
+                    const progressBar = document.getElementById('progress-bar');
+                    const progressText = document.getElementById('progress-text');
+                    if (progressBar && progressText) {
+                        progressBar.style.width = data.progress_percentage + '%';
+                        progressText.textContent = Math.round(data.progress_percentage) + '%';
+                    }
+                    
+                    // Update statistics
+                    updateStatistic('processed-standards', data.processed_standards);
+                    updateStatistic('total-standards', data.total_standards);
+                    updateStatistic('correlations-created', data.correlations_created);
+                    updateStatistic('correlations-updated', data.correlations_updated);
+                    updateStatistic('correlations-skipped', data.correlations_skipped);
+                    updateStatistic('error-count', data.error_count);
+                    
+                    // Update timing information
+                    updateTiming('duration', data.duration);
+                    updateTiming('estimated-completion', data.estimated_completion);
+                    updateTiming('avg-processing-time', data.avg_processing_time);
+                    
+                    // Stop refreshing if job is complete
+                    if (!data.is_active) {
+                        clearInterval(refreshInterval);
+                        updateActionButtons(data.status);
+                        showCompletionMessage(data);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error updating status:', error);
+                });
+        }
+        
+        function updateStatistic(id, value) {
+            const element = document.getElementById(id);
+            if (element) {
+                element.textContent = value || '0';
+            }
+        }
+        
+        function updateTiming(id, value) {
+            const element = document.getElementById(id);
+            if (element) {
+                if (value) {
+                    if (id === 'avg-processing-time') {
+                        element.textContent = parseFloat(value).toFixed(2) + ' seconds';
+                    } else if (id === 'estimated-completion') {
+                        const date = new Date(value);
+                        element.textContent = date.toLocaleString();
+                    } else {
+                        element.textContent = value;
+                    }
+                } else {
+                    element.textContent = '-';
+                }
+            }
+        }
+        
+        function getStatusDisplay(status) {
+            const statusMap = {
+                'pending': 'Pending',
+                'analyzing': 'Analyzing Standards',
+                'generating': 'Generating Correlations',
+                'completed': 'Completed',
+                'failed': 'Failed',
+                'cancelled': 'Cancelled'
+            };
+            return statusMap[status] || status;
+        }
+        
+        function updateActionButtons(status) {
+            const cancelBtn = document.getElementById('cancel-btn');
+            const refreshBtn = document.getElementById('refresh-btn');
+            
+            if (cancelBtn && status !== 'completed' && status !== 'failed' && status !== 'cancelled') {
+                cancelBtn.style.display = 'none';
+            }
+            
+            if (refreshBtn && (status === 'completed' || status === 'failed' || status === 'cancelled')) {
+                refreshBtn.textContent = 'View Results';
+            }
+        }
+        
+        function showCompletionMessage(data) {
+            const messageContainer = document.getElementById('completion-message');
+            if (!messageContainer) return;
+            
+            let message = '';
+            if (data.status === 'completed') {
+                message = `
+                    <div class="success-message">
+                        <h3>✅ Correlation Generation Completed!</h3>
+                        <p>Successfully processed ${data.processed_standards} standards and created ${data.correlations_created} new correlations.</p>
+                    </div>
+                `;
+            } else if (data.status === 'failed') {
+                message = `
+                    <div class="error-message">
+                        <h3>❌ Correlation Generation Failed</h3>
+                        <p>The job encountered errors and could not complete. Check the error log for details.</p>
+                    </div>
+                `;
+            } else if (data.status === 'cancelled') {
+                message = `
+                    <div class="warning-message">
+                        <h3>⚠️ Correlation Generation Cancelled</h3>
+                        <p>The job was cancelled before completion. Partial results may be available.</p>
+                    </div>
+                `;
+            }
+            
+            messageContainer.innerHTML = message;
+        }
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            // Start auto-refresh if job is active
+            const isActive = {{ correlation_job.is_active|yesno:"true,false" }};
+            if (isActive) {
+                refreshInterval = setInterval(updateStatus, 3000); // Update every 3 seconds
+            }
+            
+            // Initial status update
+            updateStatus();
+        });
+    </script>
+{% endblock %}
+
+{% block content %}
+<div class="status-container">
+    <div class="status-header">
+        <div class="job-title">{{ correlation_job }}</div>
+        <div class="job-details">
+            Started: {{ correlation_job.created_at|date:"M d, Y H:i" }} | 
+            Created by: {{ correlation_job.created_by }}
+        </div>
+        <div id="status-badge" class="status-badge status-{{ correlation_job.status }}">
+            {{ correlation_job.get_status_display }}
+        </div>
+    </div>
+    
+    <div class="progress-section">
+        <h2>Progress</h2>
+        <div class="progress-bar-container">
+            <div id="progress-bar" class="progress-bar" style="width: {{ correlation_job.progress_percentage }}%">
+                <div id="progress-text" class="progress-text">{{ correlation_job.progress_percentage|floatformat:0 }}%</div>
+            </div>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div id="processed-standards" class="stat-number">{{ correlation_job.processed_standards }}</div>
+                <div class="stat-label">Processed</div>
+            </div>
+            <div class="stat-card">
+                <div id="total-standards" class="stat-number">{{ correlation_job.total_standards }}</div>
+                <div class="stat-label">Total Standards</div>
+            </div>
+            <div class="stat-card">
+                <div id="correlations-created" class="stat-number">{{ correlation_job.correlations_created }}</div>
+                <div class="stat-label">Created</div>
+            </div>
+            <div class="stat-card">
+                <div id="correlations-updated" class="stat-number">{{ correlation_job.correlations_updated }}</div>
+                <div class="stat-label">Updated</div>
+            </div>
+            <div class="stat-card">
+                <div id="correlations-skipped" class="stat-number">{{ correlation_job.correlations_skipped }}</div>
+                <div class="stat-label">Skipped</div>
+            </div>
+            <div class="stat-card">
+                <div id="error-count" class="stat-number">{{ correlation_job.error_log|length }}</div>
+                <div class="stat-label">Errors</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="performance-section">
+        <h2>Performance Metrics</h2>
+        <div class="timing-info">
+            <span class="timing-label">Duration:</span>
+            <span id="duration" class="timing-value">{{ correlation_job.duration|default:"-" }}</span>
+        </div>
+        <div class="timing-info">
+            <span class="timing-label">Estimated Completion:</span>
+            <span id="estimated-completion" class="timing-value">
+                {% if correlation_job.estimated_completion %}
+                    {{ correlation_job.estimated_completion|date:"M d, Y H:i" }}
+                {% else %}
+                    -
+                {% endif %}
+            </span>
+        </div>
+        <div class="timing-info">
+            <span class="timing-label">Avg. Processing Time per Standard:</span>
+            <span id="avg-processing-time" class="timing-value">
+                {% if correlation_job.avg_processing_time_per_standard %}
+                    {{ correlation_job.avg_processing_time_per_standard|floatformat:2 }} seconds
+                {% else %}
+                    -
+                {% endif %}
+            </span>
+        </div>
+    </div>
+    
+    {% if correlation_job.status == 'completed' %}
+    <div class="correlation-results">
+        <h2>Final Results</h2>
+        <div class="result-summary">
+            <div class="stat-card">
+                <div class="stat-number">{{ correlation_job.correlations_created }}</div>
+                <div class="stat-label">New Correlations</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{{ correlation_job.correlations_updated }}</div>
+                <div class="stat-label">Updated Correlations</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{{ correlation_job.total_correlations_processed }}</div>
+                <div class="stat-label">Total Processed</div>
+            </div>
+        </div>
+        <div class="timing-info">
+            <span class="timing-label">Total Processing Time:</span>
+            <span class="timing-value">{{ correlation_job.duration }}</span>
+        </div>
+    </div>
+    {% endif %}
+    
+    {% if correlation_job.error_log %}
+    <div class="error-section">
+        <div class="error-title">Error Log ({{ correlation_job.error_log|length }} errors)</div>
+        <div class="error-list">
+            {% for error in correlation_job.error_log %}
+            <div class="error-item">
+                <strong>{{ error.timestamp|date:"H:i:s" }}:</strong> {{ error.message }}
+                {% if error.standard_code %}
+                    <br><small>Standard: {{ error.standard_code }}</small>
+                {% endif %}
+            </div>
+            {% empty %}
+            <p>No errors recorded.</p>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+    
+    <div id="completion-message"></div>
+    
+    <div class="action-buttons">
+        {% if correlation_job.is_active %}
+            <a href="{% url 'admin_cancel_correlation_job' correlation_job.id %}" 
+               class="btn btn-danger" id="cancel-btn"
+               onclick="return confirm('Are you sure you want to cancel this job?')">
+                Cancel Job
+            </a>
+        {% endif %}
+        
+        <a href="{% url 'admin_generate_correlations' %}" class="btn btn-secondary">
+            Back to Generator
+        </a>
+        
+        <a href="{% url 'admin:standards_standardcorrelation_changelist' %}" 
+           class="btn btn-primary" id="refresh-btn">
+            View Correlations
+        </a>
+        
+        {% if not correlation_job.is_active %}
+        <a href="{% url 'admin:standards_correlationjob_changelist' %}" class="btn btn-secondary">
+            View All Jobs
+        </a>
+        {% endif %}
+    </div>
+    
+    {% if correlation_job.is_active %}
+    <div class="auto-refresh">
+        <small>🔄 Auto-refreshing every 3 seconds...</small>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

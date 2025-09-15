@@ -1,0 +1,194 @@
+{% extends 'dashboard/base.html' %}
+
+{% block title %}Educational Standards Dashboard - Home{% endblock %}
+
+{% block content %}
+<div class="dashboard-header text-center">
+    <div class="container">
+        <h1 class="display-4">Educational Standards Dashboard</h1>
+        <p class="lead">Analyze curriculum coverage, discover state groupings, and explore topic intelligence</p>
+    </div>
+</div>
+
+<div class="container">
+    <!-- Overview Metrics -->
+    <div class="row mb-5">
+        <div class="col-md-3 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number">{{ total_standards|floatformat:0 }}</div>
+                    <h6 class="card-title">Total Standards</h6>
+                    <p class="text-muted">Across all states</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number">{{ total_states }}</div>
+                    <h6 class="card-title">States Covered</h6>
+                    <p class="text-muted">Educational jurisdictions</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number">{{ total_correlations|floatformat:0 }}</div>
+                    <h6 class="card-title">Correlations Found</h6>
+                    <p class="text-muted">Cross-state alignments</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3 mb-3">
+            <div class="card metric-card h-100">
+                <div class="card-body text-center">
+                    <div class="metric-number">{{ subject_areas.count }}</div>
+                    <h6 class="card-title">Subject Areas</h6>
+                    <p class="text-muted">Learning domains</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Dashboard Navigation Cards -->
+    <div class="row">
+        <div class="col-md-4 mb-4">
+            <div class="card h-100 metric-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center mb-3">
+                        <div class="me-3" style="font-size: 3rem;">🗺️</div>
+                        <div>
+                            <h5 class="card-title mb-0">Coverage Map</h5>
+                            <p class="text-muted">State coverage analysis</p>
+                        </div>
+                    </div>
+                    <p class="card-text">
+                        Analyze curriculum coverage across all 50 states. Upload your content and see which states you're hitting, which ones you're missing, and discover quick wins to maximize coverage.
+                    </p>
+                    <div class="mt-auto">
+                        <a href="{% url 'dashboard:coverage' %}" class="btn btn-outline-primary">
+                            View Coverage Map →
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-4 mb-4">
+            <div class="card h-100 metric-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center mb-3">
+                        <div class="me-3" style="font-size: 3rem;">🏛️</div>
+                        <div>
+                            <h5 class="card-title mb-0">State Groupings</h5>
+                            <p class="text-muted">Similarity clusters</p>
+                        </div>
+                    </div>
+                    <p class="card-text">
+                        Discover which states have similar educational requirements. Find regional blocks where you can "build once, deploy to many states" for maximum efficiency.
+                    </p>
+                    <div class="mt-auto">
+                        <a href="{% url 'dashboard:groupings' %}" class="btn btn-outline-primary">
+                            Explore Groupings →
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-md-4 mb-4">
+            <div class="card h-100 metric-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center mb-3">
+                        <div class="me-3" style="font-size: 3rem;">🧠</div>
+                        <div>
+                            <h5 class="card-title mb-0">Topic Intelligence</h5>
+                            <p class="text-muted">Content insights</p>
+                        </div>
+                    </div>
+                    <p class="card-text">
+                        Understand topic prevalence across states. See which topics are "must-haves" vs. regional specialties, and optimize your content strategy accordingly.
+                    </p>
+                    <div class="mt-auto">
+                        <a href="{% url 'dashboard:topics' %}" class="btn btn-outline-primary">
+                            View Topic Intel →
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Proxy Standards Tools -->
+    <div class="row mt-4">
+        <div class="col-md-6 mb-4">
+            <div class="card h-100 metric-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center mb-3">
+                        <div class="me-3" style="font-size: 3rem;">⚡</div>
+                        <div>
+                            <h5 class="card-title mb-0">Proxy Standards</h5>
+                            <p class="text-muted">Generate common standards</p>
+                        </div>
+                    </div>
+                    <p class="card-text">
+                        Create cross-state proxy standards using clustering or AI categorization. Group similar learning objectives from multiple states into unified common standards.
+                    </p>
+                    <div class="mt-auto">
+                        <a href="{% url 'dashboard:proxies' %}" class="btn btn-outline-primary">
+                            Generate Proxies →
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-6 mb-4">
+            <div class="card h-100 metric-card">
+                <div class="card-body">
+                    <div class="d-flex align-items-center mb-3">
+                        <div class="me-3" style="font-size: 3rem;">📊</div>
+                        <div>
+                            <h5 class="card-title mb-0">Proxy Run Analysis</h5>
+                            <p class="text-muted">Compare & analyze results</p>
+                        </div>
+                    </div>
+                    <p class="card-text">
+                        Analyze and compare proxy generation runs. View coverage statistics, topic prevalence across states, and detailed breakdowns with visualizations.
+                    </p>
+                    <div class="mt-auto">
+                        <a href="{% url 'dashboard:proxy_runs' %}" class="btn btn-outline-primary">
+                            View Analysis →
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Subject Areas -->
+    <div class="row mt-5">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">Available Subject Areas</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        {% for subject in subject_areas %}
+                        <div class="col-md-3 mb-2">
+                            <span class="badge bg-secondary p-2">{{ subject.name }}</span>
+                        </div>
+                        {% empty %}
+                        <div class="col-12">
+                            <p class="text-muted">No subject areas configured yet.</p>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

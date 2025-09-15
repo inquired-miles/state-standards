@@ -1,0 +1,36 @@
+Django==5.2.4
+psycopg2-binary==2.9.10
+pgvector==0.4.1
+python-dotenv==1.1.1
+dj-database-url==3.0.1
+openai>=1.0.0
+numpy>=1.21.0
+
+# REST API Framework
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+django-filter==23.5
+drf-spectacular==0.27.0
+
+# Caching and Performance
+redis==5.0.1
+django-redis==5.4.0
+celery==5.3.4
+
+# Data Analysis and ML
+scikit-learn==1.3.2
+pandas==2.1.4
+scipy>=1.11.0
+
+# File Processing
+pypdf2==3.0.1
+python-docx==1.1.0
+
+# Development and Testing
+django-extensions==3.2.3
+django-debug-toolbar==4.2.0
+pytest-django==4.7.0
+factory-boy==3.3.0
+
+# Monitoring and Logging
+sentry-sdk[django]==1.40.0
