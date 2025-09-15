@@ -116,3 +116,5 @@ Claude.md
 uploads/*
 *.log
 db.sqlite3
+
+/tasks
