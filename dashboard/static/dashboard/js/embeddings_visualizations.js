@@ -66,18 +66,40 @@
 
     // Update slider display values
     function updateSliderDisplays() {
-        document.getElementById('cluster-size-value').textContent = document.getElementById('cluster-size').value;
-        document.getElementById('epsilon-value').textContent = document.getElementById('epsilon').value;
-        document.getElementById('n-neighbors-value').textContent = document.getElementById('n-neighbors').value;
+        const clusterSizeValue = document.getElementById('cluster-size-value');
+        const epsilonValue = document.getElementById('epsilon-value');
+        const neighborsValue = document.getElementById('n-neighbors-value');
+        const clusterSizeInput = document.getElementById('cluster-size');
+        const epsilonInput = document.getElementById('epsilon');
+        const neighborsInput = document.getElementById('n-neighbors');
+
+        if (clusterSizeValue && clusterSizeInput) {
+            clusterSizeValue.textContent = clusterSizeInput.value;
+        }
+        if (epsilonValue && epsilonInput) {
+            epsilonValue.textContent = epsilonInput.value;
+        }
+        if (neighborsValue && neighborsInput) {
+            neighborsValue.textContent = neighborsInput.value;
+        }
     }
 
     // Update parameter impact indicators
     function updateParameterImpact() {
-        const clusterSize = parseInt(document.getElementById('cluster-size').value);
-        const epsilon = parseFloat(document.getElementById('epsilon').value);
-        const nNeighbors = parseInt(document.getElementById('n-neighbors').value);
-        const clusteringMethod = document.getElementById('clustering-method').value;
-        const subjectFocus = document.getElementById('subject-focus').value;
+        const clusterSizeInput = document.getElementById('cluster-size');
+        const epsilonInput = document.getElementById('epsilon');
+        const neighborsInput = document.getElementById('n-neighbors');
+        const methodSelect = document.getElementById('clustering-method');
+        const subjectSelect = document.getElementById('subject-focus');
+        if (!clusterSizeInput || !epsilonInput || !neighborsInput || !methodSelect || !subjectSelect) {
+            return;
+        }
+
+        const clusterSize = parseInt(clusterSizeInput.value);
+        const epsilon = parseFloat(epsilonInput.value);
+        const nNeighbors = parseInt(neighborsInput.value);
+        const clusteringMethod = methodSelect.value;
+        const subjectFocus = subjectSelect.value;
         
         // Calculate overall clustering tightness considering all factors
         let tightness = calculateOverallTightness(clusterSize, epsilon, nNeighbors, clusteringMethod, subjectFocus);
@@ -171,6 +193,9 @@
         }
         
         const indicator = document.getElementById('tightness-indicator');
+        if (!indicator) {
+            return;
+        }
         indicator.textContent = tightnessText;
         indicator.style.width = width;
         indicator.className = `progress-bar ${colorClass}`;
@@ -178,6 +203,9 @@
     
     function checkParameterInteractions(clusterSize, epsilon, nNeighbors) {
         const warningContainer = document.getElementById('parameter-warnings') || createWarningContainer();
+        if (!warningContainer) {
+            return;
+        }
         warningContainer.innerHTML = ''; // Clear previous warnings
         
         // Check for problematic combinations
@@ -202,11 +230,18 @@
         const container = document.createElement('div');
         container.id = 'parameter-warnings';
         container.className = 'mt-2';
-        document.querySelector('.parameter-impact-panel').appendChild(container);
+        const panel = document.querySelector('.parameter-impact-panel');
+        if (!panel) {
+            return null;
+        }
+        panel.appendChild(container);
         return container;
     }
     
     function addWarning(container, type, message) {
+        if (!container) {
+            return;
+        }
         const alertClass = type === 'warning' ? 'alert-warning' : 'alert-info';
         const icon = type === 'warning' ? 'fa-exclamation-triangle' : 'fa-info-circle';
         
@@ -259,23 +294,37 @@
             return new bootstrap.Tooltip(tooltipTriggerEl);
         });
         
-        // Initialize slider displays
-        updateSliderDisplays();
-        updateParameterImpact();
-        
-        // Add event listeners for sliders
-        document.getElementById('cluster-size').addEventListener('input', updateSliderDisplays);
-        document.getElementById('epsilon').addEventListener('input', updateSliderDisplays);
-        document.getElementById('n-neighbors').addEventListener('input', updateSliderDisplays);
-        
-        // Add event listeners for parameter impact updates (all parameters)
-        document.getElementById('cluster-size').addEventListener('input', updateParameterImpact);
-        document.getElementById('epsilon').addEventListener('input', updateParameterImpact);
-        document.getElementById('n-neighbors').addEventListener('input', updateParameterImpact);
-        
-        // Also update impact when advanced settings change
-        document.getElementById('clustering-method').addEventListener('change', updateParameterImpact);
-        document.getElementById('subject-focus').addEventListener('change', updateParameterImpact);
+        const clusterSizeInput = document.getElementById('cluster-size');
+        const epsilonInput = document.getElementById('epsilon');
+        const neighborsInput = document.getElementById('n-neighbors');
+        const clusteringMethod = document.getElementById('clustering-method');
+        const subjectFocus = document.getElementById('subject-focus');
+
+        if (clusterSizeInput && epsilonInput && neighborsInput) {
+            // Initialize slider displays
+            updateSliderDisplays();
+            updateParameterImpact();
+
+            clusterSizeInput.addEventListener('input', () => {
+                updateSliderDisplays();
+                updateParameterImpact();
+            });
+            epsilonInput.addEventListener('input', () => {
+                updateSliderDisplays();
+                updateParameterImpact();
+            });
+            neighborsInput.addEventListener('input', () => {
+                updateSliderDisplays();
+                updateParameterImpact();
+            });
+        }
+
+        if (clusteringMethod) {
+            clusteringMethod.addEventListener('change', updateParameterImpact);
+        }
+        if (subjectFocus) {
+            subjectFocus.addEventListener('change', updateParameterImpact);
+        }
         
         // Add event listeners for network graph filters
         const commonCheckbox = document.getElementById('show-common-concepts');
@@ -319,12 +368,18 @@
     }
     
     function getFormData() {
+        const gradeLevel = document.getElementById('grade-level');
+        const subjectArea = document.getElementById('subject-area');
+        const clusterSize = document.getElementById('cluster-size');
+        const epsilon = document.getElementById('epsilon');
+        const vizMode = document.getElementById('viz-mode');
+
         return {
-            grade_level: document.getElementById('grade-level').value,
-            subject_area: document.getElementById('subject-area').value,
-            cluster_size: document.getElementById('cluster-size').value,
-            epsilon: document.getElementById('epsilon').value,
-            viz_mode: document.getElementById('viz-mode').value
+            grade_level: gradeLevel ? gradeLevel.value : '',
+            subject_area: subjectArea ? subjectArea.value : '',
+            cluster_size: clusterSize ? clusterSize.value : '',
+            epsilon: epsilon ? epsilon.value : '',
+            viz_mode: vizMode ? vizMode.value : '2d'
         };
     }
     
@@ -358,7 +413,15 @@
     // 2D scatter plot using D3.js
     function renderScatterPlot2D(data) {
         const container = document.getElementById('scatter-plot');
-        
+        if (!container) {
+            console.warn('renderScatterPlot2D: scatter container not found');
+            return;
+        }
+
+        if (!container.style.minHeight) {
+            container.style.minHeight = '420px';
+        }
+
         if (!data.scatter_data || !Array.isArray(data.scatter_data)) {
             container.innerHTML = '<div class="alert alert-warning">Invalid data format: missing scatter_data array.</div>';
             return;
@@ -424,11 +487,15 @@
         }
         
         console.log('First few valid data points:', validDataPoints.slice(0, 3));
-        
+
         const margin = {top: 20, right: 80, bottom: 50, left: 50};
-        const width = container.clientWidth - margin.left - margin.right;
-        const height = container.clientHeight - margin.top - margin.bottom;
-        
+        const containerWidth = container.clientWidth || container.offsetWidth || 720;
+        const containerHeight = container.clientHeight || container.offsetHeight || 480;
+        const width = Math.max(containerWidth - margin.left - margin.right, 320);
+        const height = Math.max(containerHeight - margin.top - margin.bottom, 320);
+
+        d3.select(container).select('svg').remove();
+
         const svg = d3.select(container)
             .append('svg')
             .attr('width', width + margin.left + margin.right)
@@ -522,11 +589,19 @@
                 })
                 .attr('opacity', 0.7)
                 .on('mouseover', function(event, d) {
-                    if (d && d.state && d.title) {
-                        tooltip.transition().duration(200).style('opacity', .9);
-                        tooltip.html(`<strong>${d.state}</strong><br/>${d.title}`)
-                            .style('left', (event.pageX + 10) + 'px')
-                            .style('top', (event.pageY - 28) + 'px');
+                    if (d && d.title) {
+                        tooltip.transition().duration(200).style('opacity', 0.9);
+                        const header = d.manual_cluster_name || d.state || 'Standard';
+                        const stateLine = d.manual_cluster_name && d.state ? `<div class="text-muted">${d.state}</div>` : '';
+                        const subjectLine = d.subject ? `<div class="text-muted">Subject: ${d.subject}</div>` : '';
+                        tooltip.html(`
+                            <strong>${header}</strong>
+                            ${stateLine}
+                            <div>${d.title}</div>
+                            ${subjectLine}
+                        `.trim())
+                        .style('left', (event.pageX + 10) + 'px')
+                        .style('top', (event.pageY - 28) + 'px');
                     }
                 })
                 .on('mouseout', function() {
@@ -644,7 +719,7 @@
         }
         
         // Update legend
-        renderStateLegend(data.state_colors);
+        renderLegend(data.state_colors, data.manual_clusters);
         
         // Update cluster info
         renderClusterInfo(data.clusters);
@@ -668,11 +743,28 @@
         }
     }
     
-    function renderStateLegend(stateColors) {
+    function renderLegend(stateColors, manualClusters) {
         const legend = document.getElementById('state-legend');
+        if (!legend) {
+            return;
+        }
         legend.innerHTML = '';
-        
-        Object.entries(stateColors).forEach(([state, color]) => {
+
+        if (Array.isArray(manualClusters) && manualClusters.length) {
+            manualClusters.forEach(cluster => {
+                const item = document.createElement('div');
+                item.className = 'state-legend-item';
+                item.innerHTML = `
+                    <div class="state-color" style="background-color: ${cluster.color}"></div>
+                    <span>${cluster.name}</span>
+                    <span class="text-muted small ms-2">${cluster.standards_count || 0}</span>
+                `;
+                legend.appendChild(item);
+            });
+            return;
+        }
+
+        Object.entries(stateColors || {}).forEach(([state, color]) => {
             const item = document.createElement('div');
             item.className = 'state-legend-item';
             item.innerHTML = `
@@ -688,11 +780,13 @@
         const container = document.getElementById('scatter-plot');
         
         console.log('renderScatterPlot3D called with data:', data);
-        
+
         if (!data.scatter_data || !Array.isArray(data.scatter_data)) {
             container.innerHTML = '<div class="alert alert-warning">Invalid data format: missing scatter_data array.</div>';
             return;
         }
+
+        renderLegend(data.state_colors, data.manual_clusters);
         
         if (data.scatter_data.length === 0) {
             container.innerHTML = `
@@ -724,25 +818,35 @@
         
         console.log(`Creating 3D visualization with ${validDataPoints.length} valid points`);
         
-        // Group data by state for color consistency
-        const stateGroups = {};
+        const useManualClusters = Array.isArray(data.manual_clusters) && data.manual_clusters.length > 0;
+        const groups = {};
+        const groupLabels = {};
         validDataPoints.forEach(point => {
-            const state = point.state || 'Unknown';
-            if (!stateGroups[state]) {
-                stateGroups[state] = [];
+            let key;
+            if (useManualClusters) {
+                key = point.manual_cluster_id || 'unassigned';
+                groupLabels[key] = point.manual_cluster_name || 'Unassigned';
+            } else {
+                key = point.state || 'Unknown';
             }
-            stateGroups[state].push(point);
+            if (!groups[key]) {
+                groups[key] = [];
+            }
+            groups[key].push(point);
         });
-        
-        // Create traces for each state (scatter points)
-        const traces = Object.entries(stateGroups).map(([state, points]) => ({
+
+        const traces = Object.entries(groups).map(([key, points]) => ({
             x: points.map(p => p.x),
             y: points.map(p => p.y),
             z: points.map(p => p.z),
             mode: 'markers',
             type: 'scatter3d',
-            name: state,
-            text: points.map(p => `${p.title}<br>State: ${p.state}<br>Subject: ${p.subject || 'Unknown'}`),
+            name: useManualClusters ? groupLabels[key] : key,
+            text: points.map(p => {
+                const clusterLine = useManualClusters && p.manual_cluster_name ? `Cluster: ${p.manual_cluster_name}<br>` : '';
+                const stateLine = p.state ? `State: ${p.state}<br>` : '';
+                return `${p.title}<br>${clusterLine}${stateLine}Subject: ${p.subject || 'Unknown'}`;
+            }),
             hovertemplate: '%{text}<extra></extra>',
             marker: {
                 size: 4,

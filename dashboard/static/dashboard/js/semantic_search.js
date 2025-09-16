@@ -144,17 +144,39 @@
                 return filters;
             }
 
-            function clearSelection() {
-                selected.clear();
+            function updateSelectionUI() {
                 if (selectedList && selectedCount) {
                     renderSelectedList(selectedList, selectedCount, selected);
                 }
-                resultsList.querySelectorAll('[data-result-select]').forEach(cb => {
-                    cb.checked = false;
-                });
-                if (typeof options.onSelectionChange === 'function') {
-                    options.onSelectionChange([]);
+                if (resultsList) {
+                    const selectedIds = new Set(Array.from(selected.keys()).map(String));
+                    resultsList.querySelectorAll('[data-result-select]').forEach(cb => {
+                        cb.checked = selectedIds.has(String(cb.value));
+                    });
                 }
+            }
+
+            function emitSelectionChange() {
+                if (typeof options.onSelectionChange === 'function') {
+                    options.onSelectionChange(Array.from(selected.values()));
+                }
+            }
+
+            function clearSelection() {
+                selected.clear();
+                updateSelectionUI();
+                emitSelectionChange();
+            }
+
+            function setSelection(items) {
+                selected.clear();
+                (items || []).forEach(item => {
+                    if (item && item.id) {
+                        selected.set(item.id, item);
+                    }
+                });
+                updateSelectionUI();
+                emitSelectionChange();
             }
 
             function handleToggle(result, checked) {
@@ -163,12 +185,8 @@
                 } else {
                     selected.delete(result.id);
                 }
-                if (selectedList && selectedCount) {
-                    renderSelectedList(selectedList, selectedCount, selected);
-                }
-                if (typeof options.onSelectionChange === 'function') {
-                    options.onSelectionChange(Array.from(selected.values()));
-                }
+                updateSelectionUI();
+                emitSelectionChange();
             }
 
             function filterByState(state) {
@@ -262,9 +280,7 @@
 
             if (mode === 'select') {
                 toggle(selectionPanel, true);
-                if (selectedList && selectedCount) {
-                    renderSelectedList(selectedList, selectedCount, selected);
-                }
+                updateSelectionUI();
                 if (clearButton) {
                     clearButton.addEventListener('click', clearSelection);
                 }
@@ -289,7 +305,8 @@
             return {
                 search: performSearch,
                 clearSelection,
-                getSelected: () => Array.from(selected.values())
+                getSelected: () => Array.from(selected.values()),
+                setSelection
             };
         }
     };

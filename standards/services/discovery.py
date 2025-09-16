@@ -259,6 +259,7 @@ class CustomClusterService(BaseService):
         cluster: TopicCluster,
         *,
         standard_ids: Iterable[str],
+        title: Optional[str] = None,
         description: Optional[str] = None,
         is_shared: Optional[bool] = None,
         search_context: Optional[Dict[str, Any]] = None,
@@ -307,6 +308,8 @@ class CustomClusterService(BaseService):
                 cluster.is_shared = is_shared
             if search_context is not None:
                 cluster.search_context = search_context
+            if title is not None:
+                cluster.name = title
 
             grade_levels = self._collect_grade_levels(std for _, std in ordered)
             if grade_levels is not None:
@@ -314,6 +317,7 @@ class CustomClusterService(BaseService):
 
             self._update_cluster_metrics(cluster, [std for _, std in ordered])
 
+        cluster.save(update_fields=['name', 'description', 'is_shared', 'search_context'])
         return cluster
 
     def create_report(

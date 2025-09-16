@@ -17,7 +17,10 @@
         activeFilters: {
             gradeLevel: '',
             subjectArea: ''
-        }
+        },
+        vizMode: '2d',
+        modalMode: 'create',
+        editingClusterId: null
     };
 
     function getCookie(name) {
@@ -302,14 +305,51 @@
         }
     }
 
+    function updateVizModeButtons() {
+        const buttons = document.querySelectorAll('[data-viz-mode]');
+        buttons.forEach(button => {
+            if (button.dataset.vizMode === state.vizMode) {
+                button.classList.add('active');
+                button.classList.remove('btn-outline-primary');
+                button.classList.add('btn-primary');
+            } else {
+                button.classList.remove('active');
+                button.classList.add('btn-outline-primary');
+                button.classList.remove('btn-primary');
+            }
+        });
+    }
+
+    function setVizMode(mode, { refresh = true } = {}) {
+        if (!mode || (mode !== '2d' && mode !== '3d')) {
+            return;
+        }
+        if (state.vizMode === mode) {
+            if (refresh) {
+                refreshVisualizationForSelection();
+            }
+            return;
+        }
+        state.vizMode = mode;
+        updateVizModeButtons();
+        syncHiddenFilters();
+        if (refresh) {
+            refreshVisualizationForSelection();
+        }
+    }
+
     function syncHiddenFilters() {
         const mainGrade = document.getElementById('grade-level');
         const mainSubject = document.getElementById('subject-area');
+        const vizSelect = document.getElementById('viz-mode');
         if (mainGrade) {
             mainGrade.value = state.activeFilters.gradeLevel || '';
         }
         if (mainSubject) {
             mainSubject.value = state.activeFilters.subjectArea || '';
+        }
+        if (vizSelect) {
+            vizSelect.value = state.vizMode || '2d';
         }
     }
 
@@ -337,12 +377,16 @@
         const clusters = getSelectedClustersArray();
         const placeholder = document.getElementById('cluster-placeholder');
         const vizContainer = document.getElementById('cluster-visualizations');
+        const vizModeControls = document.getElementById('viz-mode-controls');
 
         const standardIds = clusters.flatMap(cluster => (cluster.members || []).map(member => member.id));
 
         if (!standardIds.length) {
             if (vizContainer) {
                 vizContainer.classList.add('d-none');
+            }
+            if (vizModeControls) {
+                vizModeControls.classList.add('d-none');
             }
             if (placeholder) {
                 placeholder.classList.remove('d-none');
@@ -363,8 +407,12 @@
         if (vizContainer) {
             vizContainer.classList.remove('d-none');
         }
+        if (vizModeControls) {
+            vizModeControls.classList.remove('d-none');
+        }
 
         syncHiddenFilters();
+        updateVizModeButtons();
 
         if (window.dashboardEmbeddings) {
             window.dashboardEmbeddings.setStandardFilter(standardIds);
@@ -479,7 +527,7 @@
         return Promise.resolve(null);
     }
 
-    function handleCreateCluster(selected) {
+    function handleSaveCluster(selected) {
         const modalEl = document.getElementById('cluster-builder-modal');
         if (!modalEl) return;
 
@@ -519,32 +567,52 @@
             'X-CSRFToken': state.csrfToken || getCookie('csrftoken')
         };
 
-        const url = buildEndpoint(state.endpoints.clustersEndpoint);
+        const isEdit = state.modalMode === 'edit' && state.editingClusterId;
+        const urlBase = isEdit ? state.endpoints.clusterDetailBase : state.endpoints.clustersEndpoint;
+        const url = isEdit
+            ? buildEndpoint(urlBase, `${state.editingClusterId}/`)
+            : buildEndpoint(urlBase);
         if (!url) {
             console.error('Clusters endpoint not configured');
             return;
         }
 
+        const method = isEdit ? 'PATCH' : 'POST';
+
         fetchJSON(url, {
-            method: 'POST',
+            method,
             headers,
             body: JSON.stringify(payload)
         }).then(data => {
             if (state.modal) {
                 state.modal.hide();
             }
-            loadClusterList();
+            state.modalMode = 'create';
+            state.editingClusterId = null;
             const cluster = data.data || data;
             if (cluster && cluster.id) {
-                loadClusterDetail(cluster.id);
+                state.clusterDetails.set(cluster.id, cluster);
+                loadClusterList();
+                if (isEdit) {
+                    if (state.selectedClusters.has(cluster.id)) {
+                        state.selectedClusters.set(cluster.id, cluster);
+                    }
+                    if (state.activeClusterId === cluster.id) {
+                        renderClusterDetail(cluster);
+                    }
+                    updateSelectionUI();
+                    refreshVisualizationForSelection();
+                } else {
+                    loadClusterDetail(cluster.id);
+                }
             }
         }).catch(err => {
             console.error(err);
-            alert(err.message || 'Failed to create cluster.');
+            alert(err.message || (isEdit ? 'Failed to update cluster.' : 'Failed to create cluster.'));
         });
     }
 
-    function openClusterBuilder() {
+    function openClusterModal({ mode = 'create', cluster = null } = {}) {
         const modalEl = document.getElementById('cluster-builder-modal');
         if (!modalEl || !window.bootstrap) {
             console.warn('Cluster builder modal or Bootstrap not available');
@@ -554,6 +622,8 @@
         if (!state.modal) {
             state.modal = new window.bootstrap.Modal(modalEl);
         }
+        state.modalMode = mode;
+        state.editingClusterId = cluster && cluster.id ? cluster.id : null;
 
         if (!state.searchInstance && window.dashboardSemanticSearch) {
             const searchRoot = modalEl.querySelector('[data-semantic-search]');
@@ -565,20 +635,44 @@
                 onSearchComplete: (_data, payload) => {
                     state.lastSearchPayload = payload;
                 },
-                onConfirmSelection: handleCreateCluster
+                onConfirmSelection: handleSaveCluster
             });
         }
 
         const titleInput = modalEl.querySelector('#cluster-title-input');
         const descriptionInput = modalEl.querySelector('#cluster-description-input');
-        if (titleInput) titleInput.value = '';
-        if (descriptionInput) descriptionInput.value = '';
-
-        if (state.searchInstance && typeof state.searchInstance.clearSelection === 'function') {
-            state.searchInstance.clearSelection();
+        const confirmButton = modalEl.querySelector('[data-confirm-selection]');
+        if (confirmButton) {
+            confirmButton.textContent = mode === 'edit' ? 'Save Changes' : 'Save Cluster';
         }
 
-        state.lastSearchPayload = null;
+        if (mode === 'edit' && cluster) {
+            if (titleInput) titleInput.value = cluster.name || '';
+            if (descriptionInput) descriptionInput.value = cluster.description || '';
+            const preselected = (cluster.members || []).map(member => ({
+                id: member.id,
+                title: member.title,
+                code: member.code,
+                state: member.state,
+                similarity_score: member.similarity_score
+            }));
+            if (state.searchInstance && typeof state.searchInstance.setSelection === 'function') {
+                state.searchInstance.setSelection(preselected);
+            }
+            state.lastSearchPayload = cluster.search_context || {};
+        } else {
+            if (titleInput) titleInput.value = '';
+            if (descriptionInput) descriptionInput.value = '';
+            state.lastSearchPayload = null;
+            if (state.searchInstance) {
+                if (typeof state.searchInstance.clearSelection === 'function') {
+                    state.searchInstance.clearSelection();
+                }
+                if (typeof state.searchInstance.setSelection === 'function') {
+                    state.searchInstance.setSelection([]);
+                }
+            }
+        }
 
         state.modal.show();
     }
@@ -604,7 +698,16 @@
                 subjectFilter.addEventListener('change', handleFilterChange);
                 state.activeFilters.subjectArea = subjectFilter.value || '';
             }
+            const vizButtons = document.querySelectorAll('[data-viz-mode]');
+            vizButtons.forEach(button => {
+                button.addEventListener('click', event => {
+                    event.preventDefault();
+                    const mode = button.dataset.vizMode;
+                    setVizMode(mode);
+                });
+            });
             syncHiddenFilters();
+            updateVizModeButtons();
 
             const compareBtn = document.getElementById('compare-selected-btn');
             if (compareBtn) {
@@ -625,12 +728,15 @@
 
             const trigger = document.getElementById('new-cluster-btn');
             if (trigger) {
-                trigger.addEventListener('click', openClusterBuilder);
+                trigger.addEventListener('click', () => openClusterModal({ mode: 'create' }));
             }
         },
         refresh() {
             loadClusterList();
             loadReportList();
+        },
+        openModal(options) {
+            openClusterModal(options);
         }
     };
 })();
@@ -665,10 +771,31 @@ function handleVisualizationPanel(cluster) {
         coverageSections.push(`<div class="mb-2"><strong>Grades</strong><ul class="mb-0 ps-3 small">${gradeItems}</ul></div>`);
     }
 
+    const editButtonMarkup = cluster.can_edit ? `
+        <div class="d-flex justify-content-end mb-3">
+            <button type="button" class="btn btn-sm btn-outline-primary" data-edit-cluster="${cluster.id}">
+                <i class="fas fa-edit"></i> Edit Cluster
+            </button>
+        </div>
+    ` : '';
+
     summaryEl.innerHTML = `
+        ${editButtonMarkup}
         <p class="text-muted">${cluster.description || 'No description provided.'}</p>
         <h6>Members (${cluster.standards_count})</h6>
         <ul class="ps-3">${members || '<li>No standards yet.</li>'}</ul>
         ${coverageSections.length ? `<h6 class="mt-3">Coverage Snapshot</h6>${coverageSections.join('')}` : ''}
     `;
+
+    if (cluster.can_edit) {
+        const editButton = summaryEl.querySelector('[data-edit-cluster]');
+        if (editButton) {
+            editButton.addEventListener('click', event => {
+                event.preventDefault();
+                if (window.dashboardCustomClusters && typeof window.dashboardCustomClusters.openModal === 'function') {
+                    window.dashboardCustomClusters.openModal({ mode: 'edit', cluster });
+                }
+            });
+        }
+    }
 }

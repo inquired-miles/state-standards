@@ -3,6 +3,7 @@ Secure API views for embeddings visualization with proper validation and caching
 """
 from typing import Dict, List, Optional, Any
 from uuid import UUID
+import json
 from django.http import JsonResponse
 from django.core.exceptions import ValidationError
 from django.db.models import Q, Avg
@@ -79,6 +80,42 @@ class EmbeddingsAPIView(BaseAPIView):
                 raise ValidationError(f"Invalid standard ID: {raw_id}")
         return cleaned_ids
 
+    def parse_cluster_labels(self, request) -> Dict[str, List[str]]:
+        """Parse optional cluster label mapping for manual visualization coloring"""
+        raw_labels = request.GET.get('cluster_labels')
+        if not raw_labels:
+            return {}
+
+        try:
+            parsed = json.loads(raw_labels)
+        except json.JSONDecodeError:
+            raise ValidationError("cluster_labels must be valid JSON")
+
+        if not isinstance(parsed, dict):
+            raise ValidationError("cluster_labels must be a JSON object")
+
+        cleaned: Dict[str, List[str]] = {}
+        for raw_cluster_id, member_ids in parsed.items():
+            try:
+                cluster_id = str(UUID(str(raw_cluster_id)))
+            except (ValueError, TypeError):
+                raise ValidationError(f"Invalid cluster ID: {raw_cluster_id}")
+
+            if not isinstance(member_ids, list):
+                raise ValidationError("cluster_labels values must be lists of standard IDs")
+
+            cleaned_members: List[str] = []
+            for raw_member_id in member_ids:
+                try:
+                    cleaned_members.append(str(UUID(str(raw_member_id))))
+                except (ValueError, TypeError):
+                    raise ValidationError(f"Invalid standard ID in cluster_labels: {raw_member_id}")
+
+            if cleaned_members:
+                cleaned[cluster_id] = cleaned_members
+
+        return cleaned
+
 
 @api_endpoint(['GET'])
 def embeddings_visualization_data_api(request):
@@ -88,8 +125,7 @@ def embeddings_visualization_data_api(request):
     try:
         # Parse explicit standard IDs if provided (custom cluster use case)
         standard_ids = view.parse_standard_ids(request)
-
-        standard_ids = view.parse_standard_ids(request)
+        manual_cluster_labels = view.parse_cluster_labels(request)
 
         # Validate parameters
         grade_level = request.GET.get('grade_level')
@@ -118,12 +154,16 @@ def embeddings_visualization_data_api(request):
             viz_mode = '2d'
         
         # Create cache key for this specific request
-        if not standard_ids:
+        if standard_ids or manual_cluster_labels:
+            cache_key = None
+            logger.info(
+                "Visualization request with explicit standards (%s) and manual clusters (%s)",
+                len(standard_ids),
+                len(manual_cluster_labels),
+            )
+        else:
             cache_key = f"embeddings_viz_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}_{viz_mode}"
             logger.info(f"Cache key: {cache_key} (cluster_size={cluster_size}, epsilon={epsilon})")
-        else:
-            cache_key = None
-            logger.info(f"Visualization request with explicit standards ({len(standard_ids)})")
 
         def calculate_visualization_data():
             # Determine standards to analyze
@@ -210,17 +250,47 @@ def embeddings_visualization_data_api(request):
                     'scatter_data': [],
                     'clusters': [],
                     'state_colors': {},
+                    'manual_clusters': [],
                     'total_standards': 0,
                     'message': message,
                     'debug_info': debug_info
                 }
             
+            manual_cluster_assignments: Dict[str, str] = {}
+            manual_cluster_counts: Dict[str, int] = {}
+            manual_cluster_metadata: List[Dict[str, Any]] = []
+            manual_cluster_colors: Dict[str, str] = {}
+            manual_cluster_names: Dict[str, str] = {}
+            manual_mode = bool(manual_cluster_labels)
+            if manual_cluster_labels:
+                for cluster_id, member_ids in manual_cluster_labels.items():
+                    for member_id in member_ids:
+                        manual_cluster_assignments[member_id] = cluster_id
+                    manual_cluster_counts[cluster_id] = 0
+
+                cluster_objects = TopicCluster.objects.filter(id__in=manual_cluster_labels.keys())
+                manual_cluster_names = {
+                    str(cluster.id): cluster.name for cluster in cluster_objects
+                }
+
             # Prepare color palette
             color_palette = [
                 '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57',
                 '#FF9FF3', '#54A0FF', '#5F27CD', '#00D2D3', '#FF9F43',
                 '#48CAE4', '#023E8A', '#FFB3BA', '#B5EAD7', '#C7CEEA'
             ]
+
+            if manual_cluster_labels:
+                for index, cluster_id in enumerate(manual_cluster_labels.keys()):
+                    color = color_palette[index % len(color_palette)]
+                    manual_cluster_colors[cluster_id] = color
+                    manual_cluster_metadata.append({
+                        'id': cluster_id,
+                        'name': manual_cluster_names.get(cluster_id, f'Cluster {index + 1}'),
+                        'color': color,
+                        'standards_count': 0,
+                        'index': index
+                    })
             
             # Build state color mapping
             state_colors = {}
@@ -262,6 +332,7 @@ def embeddings_visualization_data_api(request):
                     'scatter_data': [],
                     'clusters': [],
                     'state_colors': state_colors,
+                    'manual_clusters': manual_cluster_metadata,
                     'total_standards': 0,
                     'message': 'No valid embeddings found for visualization'
                 }
@@ -321,77 +392,89 @@ def embeddings_visualization_data_api(request):
                     else:
                         umap_embeddings = embeddings_matrix[:, :2]
 
-                try:
-                    min_cluster_size = max(2, cluster_size)
-                    min_samples = max(1, min_cluster_size // 2)
-                    logger.info(f"HDBSCAN parameters: min_cluster_size={min_cluster_size}, min_samples={min_samples}, epsilon={epsilon}")
-                    clusterer = hdbscan.HDBSCAN(
-                        min_cluster_size=min_cluster_size,
-                        min_samples=min_samples,
-                        metric='euclidean',
-                        cluster_selection_epsilon=epsilon
-                    )
-                    cluster_labels = clusterer.fit_predict(umap_embeddings)
-                    n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
-                    n_noise = (cluster_labels == -1).sum()
-                    logger.info(f"HDBSCAN clustering: {n_clusters} clusters, {n_noise} noise points")
-                    from collections import Counter
-                    cluster_sizes = Counter(cluster_labels)
-                    non_noise_sizes = [size for label, size in cluster_sizes.items() if label != -1]
-                    if non_noise_sizes:
-                        logger.info(f"Cluster sizes: min={min(non_noise_sizes)}, max={max(non_noise_sizes)}, avg={sum(non_noise_sizes)/len(non_noise_sizes):.1f}")
-                    max_cluster_size = max(non_noise_sizes)
-                    if max_cluster_size > n_total * 0.7:
-                        logger.warning(f"Dominant cluster detected: {max_cluster_size}/{n_total} ({max_cluster_size/n_total:.1%})")
-                except Exception as e:
-                    logger.error(f"HDBSCAN failed: {e}")
-                    # Try KMeans as a fallback clustering method when HDBSCAN blows up completely
-                    logger.info("HDBSCAN failed completely, trying KMeans fallback")
-                    cluster_labels = np.asarray(
-                        _fallback_kmeans_clustering(
-                            umap_embeddings,
-                            len(embeddings_matrix),
-                            cluster_size,
-                            logger,
+                if not manual_mode:
+                    try:
+                        min_cluster_size = max(2, cluster_size)
+                        min_samples = max(1, min_cluster_size // 2)
+                        logger.info(f"HDBSCAN parameters: min_cluster_size={min_cluster_size}, min_samples={min_samples}, epsilon={epsilon}")
+                        clusterer = hdbscan.HDBSCAN(
+                            min_cluster_size=min_cluster_size,
+                            min_samples=min_samples,
+                            metric='euclidean',
+                            cluster_selection_epsilon=epsilon
                         )
-                    )
-                    unique_labels = set(cluster_labels.tolist())
-                    n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
-                    n_noise = int(np.sum(cluster_labels == -1))
-                
-                # Enhanced retry logic with min_samples adjustment
-                if n_clusters == 0 and len(embeddings_matrix) > 10:
-                    logger.warning(f"Got zero clusters, retrying with more permissive settings")
+                        cluster_labels = clusterer.fit_predict(umap_embeddings)
+                        n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+                        n_noise = (cluster_labels == -1).sum()
+                        logger.info(f"HDBSCAN clustering: {n_clusters} clusters, {n_noise} noise points")
+                        from collections import Counter
+                        cluster_sizes = Counter(cluster_labels)
+                        non_noise_sizes = [size for label, size in cluster_sizes.items() if label != -1]
+                        if non_noise_sizes:
+                            logger.info(f"Cluster sizes: min={min(non_noise_sizes)}, max={max(non_noise_sizes)}, avg={sum(non_noise_sizes)/len(non_noise_sizes):.1f}")
+                        max_cluster_size = max(non_noise_sizes) if non_noise_sizes else 0
+                        if non_noise_sizes and max_cluster_size > n_total * 0.7:
+                            logger.warning(f"Dominant cluster detected: {max_cluster_size}/{n_total} ({max_cluster_size/n_total:.1%})")
+                    except Exception as e:
+                        logger.error(f"HDBSCAN failed: {e}")
+                        # Try KMeans as a fallback clustering method when HDBSCAN blows up completely
+                        logger.info("HDBSCAN failed completely, trying KMeans fallback")
+                        cluster_labels = np.asarray(
+                            _fallback_kmeans_clustering(
+                                umap_embeddings,
+                                len(embeddings_matrix),
+                                cluster_size,
+                                logger,
+                            )
+                        )
+                        unique_labels = set(cluster_labels.tolist())
+                        n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+                        n_noise = int(np.sum(cluster_labels == -1))
                     
-                    # Phase 1: Enhanced retry with both min_cluster_size and min_samples adjustment
-                    retry_min_size = max(2, min_cluster_size // 2)
-                    retry_min_samples = max(1, retry_min_size // 2)  # Adjust min_samples too
-                    retry_epsilon = min(1.0, epsilon * 1.5)  # More permissive
-                    
-                    logger.info(f"Retry with min_cluster_size={retry_min_size}, min_samples={retry_min_samples}, epsilon={retry_epsilon}")
-                    
-                    retry_clusterer = hdbscan.HDBSCAN(
-                        min_cluster_size=retry_min_size,
-                        min_samples=retry_min_samples,
-                        metric='euclidean',
-                        cluster_selection_epsilon=retry_epsilon
-                    )
-                    retry_labels = retry_clusterer.fit_predict(umap_embeddings)
-                    retry_n_clusters = len(set(retry_labels)) - (1 if -1 in retry_labels else 0)
-                    
-                    logger.info(f"Retry result: {retry_n_clusters} clusters")
-                    
-                    # Use retry result if we got any clusters
-                    if retry_n_clusters > 0:
-                        cluster_labels = retry_labels
-                        logger.info(f"Using retry clustering with {retry_n_clusters} clusters")
-                    else:
-                        logger.warning("Retry also failed, keeping original results")
-            # First, identify weak clusters (less than 3 members)
-            from collections import Counter
-            cluster_sizes_check = Counter(cluster_labels)
-            weak_cluster_ids = {label for label, count in cluster_sizes_check.items() 
-                               if label != -1 and count < 3}
+                    # Enhanced retry logic with min_samples adjustment
+                    if n_clusters == 0 and len(embeddings_matrix) > 10:
+                        logger.warning(f"Got zero clusters, retrying with more permissive settings")
+                        
+                        # Phase 1: Enhanced retry with both min_cluster_size and min_samples adjustment
+                        retry_min_size = max(2, min_cluster_size // 2)
+                        retry_min_samples = max(1, retry_min_size // 2)  # Adjust min_samples too
+                        retry_epsilon = min(1.0, epsilon * 1.5)  # More permissive
+                        
+                        logger.info(f"Retry with min_cluster_size={retry_min_size}, min_samples={retry_min_samples}, epsilon={retry_epsilon}")
+                        
+                        retry_clusterer = hdbscan.HDBSCAN(
+                            min_cluster_size=retry_min_size,
+                            min_samples=retry_min_samples,
+                            metric='euclidean',
+                            cluster_selection_epsilon=retry_epsilon
+                        )
+                        retry_labels = retry_clusterer.fit_predict(umap_embeddings)
+                        retry_n_clusters = len(set(retry_labels)) - (1 if -1 in retry_labels else 0)
+                        
+                        logger.info(f"Retry result: {retry_n_clusters} clusters")
+                        
+                        # Use retry result if we got any clusters
+                        if retry_n_clusters > 0:
+                            cluster_labels = retry_labels
+                            logger.info(f"Using retry clustering with {retry_n_clusters} clusters")
+                        else:
+                            logger.warning("Retry also failed, keeping original results")
+
+            if manual_mode:
+                cluster_index_map = {meta['id']: meta['index'] for meta in manual_cluster_metadata}
+                cluster_labels = np.full(len(valid_standards), -1, dtype=int)
+                for idx, standard in enumerate(valid_standards):
+                    cid = manual_cluster_assignments.get(str(standard.id))
+                    if cid is not None and cid in cluster_index_map:
+                        cluster_labels[idx] = cluster_index_map[cid]
+                n_clusters = len(cluster_index_map)
+                n_noise = int(np.sum(cluster_labels == -1))
+                weak_cluster_ids = set()
+            else:
+                from collections import Counter
+                cluster_sizes_check = Counter(cluster_labels)
+                weak_cluster_ids = {label for label, count in cluster_sizes_check.items() 
+                                   if label != -1 and count < 3}
             
             # Build scatter plot data with UMAP coordinates
             for i, standard in enumerate(valid_standards):
@@ -422,15 +505,39 @@ def embeddings_visualization_data_api(request):
                     'subject': standard.subject_area.name if standard.subject_area else 'Unknown',
                     'cluster': int(cluster_label) if cluster_label != -1 else -1
                 }
-                
+
                 # Add z-coordinate for 3D visualization
                 if viz_mode == '3d' and umap_embeddings.shape[1] >= 3:
                     data_point['z'] = float(umap_embeddings[i, 2])
-                
+
+                manual_cluster_id = manual_cluster_assignments.get(str(standard.id))
+                if manual_cluster_id:
+                    data_point['manual_cluster_id'] = manual_cluster_id
+                    data_point['manual_cluster_name'] = manual_cluster_names.get(
+                        manual_cluster_id,
+                        f"Cluster {manual_cluster_id[:8]}"
+                    )
+                    if manual_cluster_id in manual_cluster_colors:
+                        data_point['color'] = manual_cluster_colors[manual_cluster_id]
+                    manual_cluster_counts[manual_cluster_id] = manual_cluster_counts.get(manual_cluster_id, 0) + 1
+
                 scatter_data.append(data_point)
-            
-            # Generate real clusters from HDBSCAN results
-            clusters = _generate_real_clusters(valid_standards, umap_embeddings, cluster_labels, state_colors, viz_mode)
+
+            if manual_cluster_metadata:
+                for meta in manual_cluster_metadata:
+                    meta['standards_count'] = manual_cluster_counts.get(meta['id'], 0)
+
+            if manual_mode:
+                clusters = _generate_manual_clusters(
+                    valid_standards,
+                    umap_embeddings,
+                    cluster_labels,
+                    manual_cluster_metadata,
+                    viz_mode
+                )
+            else:
+                # Generate real clusters from HDBSCAN results
+                clusters = _generate_real_clusters(valid_standards, umap_embeddings, cluster_labels, state_colors, viz_mode)
 
             # For explicitly selected standards with few items, synthesize a simple cluster
             if standard_ids and not clusters and valid_standards:
@@ -477,7 +584,7 @@ def embeddings_visualization_data_api(request):
                         'subject_area': standard.subject_area.name if standard.subject_area else 'Unknown',
                         'grade_levels': sorted(standard.grade_levels.values_list('grade_numeric', flat=True)) or [],
                         'domain': getattr(standard, 'domain', ''),
-                        'cluster_id': 'manual'
+                        'cluster_id': manual_cluster_assignments.get(str(standard.id), 'manual')
                     }
                     if umap_embeddings.shape[1] >= 1:
                         detail['x'] = float(umap_embeddings[idx, 0])
@@ -531,6 +638,7 @@ def embeddings_visualization_data_api(request):
                 'scatter_data': scatter_data,
                 'clusters': clusters,
                 'state_colors': state_colors,
+                'manual_clusters': manual_cluster_metadata,
                 'total_standards': len(scatter_data),
                 'clustered_standards': meaningful_clustered,  # Only count meaningful clusters
                 'unclustered_standards': effectively_unclustered,  # Include weak clusters as unclustered
@@ -763,8 +871,10 @@ def embeddings_network_graph_api(request):
         secondary_threshold = float(request.GET.get('secondary_threshold', 0.5))
         
         # Create cache key including clustering parameters
+        manual_cluster_labels = view.parse_cluster_labels(request)
+
         cache_key = None
-        if not standard_ids:
+        if not standard_ids and not manual_cluster_labels:
             cache_key = f"network_graph_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
 
         def calculate_network_graph():
@@ -829,6 +939,130 @@ def embeddings_network_graph_api(request):
             
             embeddings_matrix = np.array(embeddings_matrix)
             
+            if manual_cluster_labels:
+                color_palette = [
+                    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57',
+                    '#FF9FF3', '#54A0FF', '#5F27CD', '#00D2D3', '#FF9F43',
+                    '#48CAE4', '#023E8A', '#FFB3BA', '#B5EAD7', '#C7CEEA'
+                ]
+                cluster_objects = TopicCluster.objects.filter(id__in=manual_cluster_labels.keys())
+                cluster_name_map = {str(cluster.id): cluster.name for cluster in cluster_objects}
+                standards_by_id = {str(std.id): std for std in valid_standards}
+
+                nodes = []
+                edges = []
+                cluster_analysis = {}
+                standard_nodes_added = set()
+
+                for index, (cluster_id, member_ids) in enumerate(manual_cluster_labels.items()):
+                    cluster_standards = [standards_by_id[sid] for sid in member_ids if sid in standards_by_id]
+                    if not cluster_standards:
+                        continue
+
+                    color = color_palette[index % len(color_palette)]
+                    concept_node_id = f'concept_manual_{index}'
+                    cluster_name = cluster_name_map.get(cluster_id, f'Cluster {index + 1}')
+
+                    nodes.append({
+                        'id': concept_node_id,
+                        'type': 'concept',
+                        'concept_type': 'manual',
+                        'label': cluster_name,
+                        'color': color,
+                        'size': 20 + len(cluster_standards),
+                        'cluster_size': len(cluster_standards),
+                        'total_standards': len(cluster_standards),
+                        'shown_standards': len(cluster_standards),
+                        'state_coverage': len({std.state.code for std in cluster_standards if std.state}),
+                        'coverage_percentage': 100.0,
+                        'implementing_states': [std.state.code for std in cluster_standards if std.state],
+                        'importance': 5,
+                        'keywords': _extract_key_topics(cluster_standards)
+                    })
+
+                    cluster_analysis[str(cluster_id)] = {
+                        'states': {std.state.code for std in cluster_standards if std.state},
+                        'coverage': 1.0,
+                        'type': 'manual',
+                        'name': cluster_name,
+                        'color': color,
+                        'importance': 5,
+                        'standards': cluster_standards
+                    }
+
+                    for std in cluster_standards:
+                        state_code = std.state.code if std.state else 'Unknown'
+                        standard_node_id = f'std_{std.id}'
+                        if standard_node_id not in standard_nodes_added:
+                            nodes.append({
+                                'id': standard_node_id,
+                                'type': 'standard',
+                                'label': (std.title or std.description or 'Standard')[:40] + '...',
+                                'state': state_code,
+                                'color': '#F0B27A',
+                                'size': 10,
+                                'concept_type': 'manual',
+                                'cluster_id': cluster_id,
+                                'cluster_type': 'manual',
+                                'full_text': std.description or std.title or ''
+                            })
+                            standard_nodes_added.add(standard_node_id)
+
+                        edges.append({
+                            'source': concept_node_id,
+                            'target': standard_node_id,
+                            'type': 'implements',
+                            'weight': 1.0,
+                            'style': 'solid',
+                            'color': '#95A5A6',
+                            'width': 2
+                        })
+
+                assigned_ids = {sid for ids in manual_cluster_labels.values() for sid in ids}
+                unassigned = [std for std in valid_standards if str(std.id) not in assigned_ids]
+                for std in unassigned:
+                    standard_node_id = f'std_{std.id}'
+                    if standard_node_id not in standard_nodes_added:
+                        nodes.append({
+                            'id': standard_node_id,
+                            'type': 'standard',
+                            'label': (std.title or std.description or 'Standard')[:40] + '...',
+                            'state': std.state.code if std.state else 'Unknown',
+                            'color': '#BDC3C7',
+                            'size': 8,
+                            'concept_type': 'unassigned',
+                            'cluster_id': 'unassigned',
+                            'cluster_type': 'unassigned',
+                            'full_text': std.description or std.title or ''
+                        })
+                        standard_nodes_added.add(standard_node_id)
+
+                return {
+                    'nodes': nodes,
+                    'edges': edges,
+                    'total_nodes': len(nodes),
+                    'total_edges': len(edges),
+                    'concept_count': len([n for n in nodes if n['type'] == 'concept']),
+                    'standard_count': len([n for n in nodes if n['type'] == 'standard']),
+                    'core_concept_count': len([n for n in nodes if n.get('concept_type') == 'manual']),
+                    'regional_concept_count': 0,
+                    'state_specific_count': len(unassigned),
+                    'states_represented': len({n.get('state') for n in nodes if n.get('state')}),
+                    'cluster_analysis': {
+                        cid: {
+                            'states': list(analysis['states']),
+                            'coverage': float(analysis['coverage']),
+                            'type': analysis['type'],
+                            'name': analysis['name'],
+                            'color': analysis['color'],
+                            'importance': int(analysis['importance']),
+                            'total_standards': len(analysis['standards']),
+                            'keywords': analysis.get('keywords', [])
+                        }
+                        for cid, analysis in cluster_analysis.items()
+                    }
+                }
+
             # Perform clustering to identify concepts
             try:
                 import umap
@@ -1493,6 +1727,92 @@ def _generate_real_clusters(standards: List[Standard], umap_embeddings: np.ndarr
     # Sort clusters by size (largest first)
     clusters.sort(key=lambda x: x['standards_count'], reverse=True)
     
+    return clusters
+
+
+def _generate_manual_clusters(
+    standards: List[Standard],
+    umap_embeddings: np.ndarray,
+    cluster_labels: np.ndarray,
+    manual_metadata: List[Dict[str, Any]],
+    viz_mode: str = '2d'
+) -> List[Dict[str, Any]]:
+    clusters: List[Dict[str, Any]] = []
+    for meta in manual_metadata:
+        cluster_index = meta.get('index')
+        if cluster_index is None:
+            continue
+        member_indices = np.where(cluster_labels == cluster_index)[0]
+        if member_indices.size == 0:
+            continue
+
+        cluster_standards = [standards[i] for i in member_indices]
+        cluster_embeddings = umap_embeddings[member_indices]
+
+        center_x = float(np.mean(cluster_embeddings[:, 0]))
+        center_y = float(np.mean(cluster_embeddings[:, 1]))
+        cluster_center = {'x': center_x, 'y': center_y}
+
+        if viz_mode == '3d' and cluster_embeddings.shape[1] >= 3:
+            center_z = float(np.mean(cluster_embeddings[:, 2]))
+            cluster_center['z'] = center_z
+            distances_3d = np.sqrt(
+                (cluster_embeddings[:, 0] - center_x) ** 2 +
+                (cluster_embeddings[:, 1] - center_y) ** 2 +
+                (cluster_embeddings[:, 2] - center_z) ** 2
+            )
+            cluster_radius = float(np.max(distances_3d)) * 1.2 if len(distances_3d) else 0.0
+            radius_3d = cluster_radius
+        else:
+            distances = np.sqrt(
+                (cluster_embeddings[:, 0] - center_x) ** 2 +
+                (cluster_embeddings[:, 1] - center_y) ** 2
+            )
+            cluster_radius = float(np.max(distances)) * 1.2 if len(distances) else 0.0
+            radius_3d = None
+
+        state_counts = Counter(
+            standard.state.code for standard in cluster_standards if standard.state
+        )
+
+        standards_details = []
+        for standard in cluster_standards:
+            grade_levels = list(standard.grade_levels.values_list('grade_numeric', flat=True))
+            display_title = standard.title or standard.description or f"Standard {str(standard.id)[:8]}"
+            display_description = standard.description or "No description available"
+            if len(display_description) > 200:
+                display_description = display_description[:200] + '...'
+
+            standards_details.append({
+                'id': str(standard.id),
+                'title': display_title,
+                'description': display_description,
+                'state': standard.state.code if standard.state else 'Unknown',
+                'state_name': standard.state.name if standard.state else 'Unknown',
+                'subject_area': standard.subject_area.name if standard.subject_area else 'Unknown',
+                'grade_levels': sorted(grade_levels) if grade_levels else [],
+                'domain': getattr(standard, 'domain', ''),
+                'cluster_id': meta['id']
+            })
+
+        clusters.append({
+            'id': cluster_index,
+            'manual_cluster_id': meta['id'],
+            'name': meta['name'],
+            'color': meta['color'],
+            'center': cluster_center,
+            'radius': cluster_radius,
+            'radius_3d': radius_3d,
+            'states': list(state_counts.keys()),
+            'state_distribution': dict(state_counts),
+            'key_topics': _extract_key_topics(cluster_standards),
+            'size': len(cluster_standards),
+            'standards_count': len(cluster_standards),
+            'standards': standards_details,
+            'source': 'manual'
+        })
+
+    clusters.sort(key=lambda x: x['standards_count'], reverse=True)
     return clusters
 
 
@@ -2354,11 +2674,14 @@ def embeddings_cluster_matrix_api(request):
         )
         
         # Create cache key
+        manual_cluster_labels = view.parse_cluster_labels(request)
+
         cache_key = None
-        if not standard_ids:
+        if not standard_ids and not manual_cluster_labels:
             cache_key = f"topic_coverage_matrix_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
 
         def calculate_cluster_matrix():
+            manual_labels = manual_cluster_labels or {}
             if standard_ids:
                 standards_query = Standard.objects.filter(
                     id__in=standard_ids,
@@ -2374,6 +2697,82 @@ def embeddings_cluster_matrix_api(request):
                         'state_codes': [],
                         'coverage_matrix': [],
                         'error': 'No standards found for coverage analysis'
+                    }
+
+                if manual_labels:
+                    cluster_objects = TopicCluster.objects.filter(id__in=manual_labels.keys())
+                    cluster_name_map = {str(cluster.id): cluster.name for cluster in cluster_objects}
+
+                    standards_by_id = {str(std.id): std for std in standards}
+                    state_codes_set = set()
+                    topic_names = []
+                    topic_metadata = []
+                    coverage_rows = []
+
+                    for index, (cluster_id, member_ids) in enumerate(manual_labels.items()):
+                        cluster_standards = [standards_by_id[sid] for sid in member_ids if sid in standards_by_id]
+                        if not cluster_standards:
+                            continue
+
+                        state_counts = Counter(
+                            std.state.code if std.state else 'Unknown'
+                            for std in cluster_standards
+                        )
+                        state_codes_set.update(state_counts.keys())
+                        max_count = max(state_counts.values()) if state_counts else 1
+
+                        cluster_name = cluster_name_map.get(cluster_id, f'Cluster {index + 1}')
+                        topic_names.append(cluster_name)
+                        topic_metadata.append({
+                            'cluster_id': cluster_id,
+                            'name': cluster_name,
+                            'total_standards': len(cluster_standards),
+                            'states_covered': len(state_counts),
+                            'sample_standards': [
+                                (std.title or std.description or '')[:80]
+                                for std in cluster_standards[:5]
+                            ]
+                        })
+                        coverage_rows.append((state_counts, max_count))
+
+                    assigned_ids = {sid for ids in manual_labels.values() for sid in ids}
+                    unassigned = [std for std in standards if str(std.id) not in assigned_ids]
+                    if unassigned:
+                        state_counts = Counter(
+                            std.state.code if std.state else 'Unknown'
+                            for std in unassigned
+                        )
+                        state_codes_set.update(state_counts.keys())
+                        max_count = max(state_counts.values()) if state_counts else 1
+                        topic_names.append('Unassigned Standards')
+                        topic_metadata.append({
+                            'cluster_id': 'unassigned',
+                            'name': 'Unassigned Standards',
+                            'total_standards': len(unassigned),
+                            'states_covered': len(state_counts),
+                            'sample_standards': [
+                                (std.title or std.description or '')[:80]
+                                for std in unassigned[:5]
+                            ]
+                        })
+                        coverage_rows.append((state_counts, max_count))
+
+                    state_codes = sorted(state_codes_set)
+                    coverage_matrix = []
+                    for state_counts, max_count in coverage_rows:
+                        coverage_matrix.append([
+                            round(state_counts.get(code, 0) / max_count if max_count else 0, 3)
+                            for code in state_codes
+                        ])
+
+                    return {
+                        'topic_names': topic_names,
+                        'state_codes': state_codes,
+                        'coverage_matrix': coverage_matrix,
+                        'topic_metadata': topic_metadata,
+                        'total_topics': len(topic_names),
+                        'total_states': len(state_codes),
+                        'total_standards': len(standards)
                     }
 
                 # Build simple state coverage matrix for selected standards

@@ -90,6 +90,17 @@
                     Use the controls on the left to load an existing cluster or start a new one from the semantic search workflow. Selected clusters will surface member standards, similarity scores, and coverage summaries here.
                 </div>
                 <div id="cluster-summary" class="mt-3 d-none"></div>
+                <div id="viz-mode-controls" class="d-flex justify-content-end align-items-center gap-2 mt-3 d-none">
+                    <span class="text-muted small">View</span>
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Visualization mode">
+                        <button type="button" class="btn btn-outline-primary active" data-viz-mode="2d">
+                            <i class="fas fa-braille"></i> 2D
+                        </button>
+                        <button type="button" class="btn btn-outline-primary" data-viz-mode="3d">
+                            <i class="fas fa-cube"></i> 3D
+                        </button>
+                    </div>
+                </div>
                 <div id="cluster-visualizations" class="d-none">
                     {% include "dashboard/partials/embeddings_visualizations.html" with simple_mode=True %}
                 </div>
@@ -155,10 +166,10 @@
     }
 </script>
 <script src="https://d3js.org/d3.v7.min.js"></script>
-<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
-<script src="{% static 'dashboard/js/semantic_search.js' %}"></script>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="{% static 'dashboard/js/semantic_search.js' %}?v=2"></script>
 <script src="{% static 'dashboard/js/embeddings_visualizations.js' %}"></script>
-<script src="{% static 'dashboard/js/custom_clusters.js' %}?v=2"></script>
+<script src="{% static 'dashboard/js/custom_clusters.js' %}?v=3"></script>
 <script>
     // Minimal bootstrapping; detailed logic will live in shared JS modules refactored from embeddings page
     document.addEventListener('DOMContentLoaded', () => {

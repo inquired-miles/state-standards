@@ -170,7 +170,7 @@
 
 <!-- D3.js for advanced visualizations -->
 <script src="https://d3js.org/d3.v7.min.js"></script>
-<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 {% endblock %}
 
 {% block content %}
@@ -203,6 +203,6 @@
         });
     }
 </script>
-<script src="{% static 'dashboard/js/semantic_search.js' %}"></script>
+<script src="{% static 'dashboard/js/semantic_search.js' %}?v=2"></script>
 <script src="{% static 'dashboard/js/embeddings_visualizations.js' %}"></script>
 {% endblock %}

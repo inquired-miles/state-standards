@@ -26,7 +26,17 @@ class CustomClusterAPIView(BaseAPIView):
         except (TypeError, ValueError):
             raise ValidationError(f"Invalid {field_name}")
 
-    def serialize_cluster(self, cluster: TopicCluster, include_members: bool = False) -> Dict[str, Any]:
+    def serialize_cluster(
+        self,
+        cluster: TopicCluster,
+        include_members: bool = False,
+        current_user=None
+    ) -> Dict[str, Any]:
+        can_edit = bool(
+            current_user
+            and cluster.origin == 'custom'
+            and cluster.created_by == current_user
+        )
         data = {
             'id': str(cluster.id),
             'name': cluster.name,
@@ -39,6 +49,7 @@ class CustomClusterAPIView(BaseAPIView):
             'subject_area': cluster.subject_area.name if cluster.subject_area else None,
             'updated_at': cluster.updated_at,
             'search_context': cluster.search_context or {},
+            'can_edit': can_edit,
         }
         if include_members:
             members = []
@@ -90,7 +101,7 @@ def custom_clusters_api(request):
             else:
                 queryset = queryset.filter(created_by=user)
             queryset = queryset.select_related('subject_area', 'created_by').order_by('-updated_at')
-            clusters = [view.serialize_cluster(cluster) for cluster in queryset]
+            clusters = [view.serialize_cluster(cluster, current_user=user) for cluster in queryset]
             return view.success_response({'clusters': clusters})
 
         data = view.parse_json_body(request)
@@ -114,7 +125,10 @@ def custom_clusters_api(request):
             similarity_map=similarity_map,
         )
 
-        return view.success_response(view.serialize_cluster(cluster, include_members=True), status=201)
+        return view.success_response(
+            view.serialize_cluster(cluster, include_members=True, current_user=user),
+            status=201
+        )
 
     except Exception as e:
         return view.handle_exception(request, e)
@@ -132,21 +146,28 @@ def custom_cluster_detail_api(request, cluster_id: str):
         if request.method == 'GET':
             if cluster.origin == 'custom' and cluster.created_by != user and not cluster.is_shared:
                 raise PermissionDenied("Cluster is private")
-            return view.success_response(view.serialize_cluster(cluster, include_members=True))
+            return view.success_response(
+                view.serialize_cluster(cluster, include_members=True, current_user=user)
+            )
 
         if request.method == 'PATCH':
             view.ensure_cluster_owner(cluster, user)
             data = view.parse_json_body(request)
+            title = data.get('title')
             standard_ids = data.get('standard_ids')
             description = data.get('description')
             is_shared = data.get('is_shared')
             search_context = data.get('search_context')
             similarity_map = data.get('similarity_map') or {}
 
+            if title is not None:
+                title = view.validate_string(title, min_length=3, max_length=200, field_name='title')
+
             if standard_ids:
                 cluster = view.service.update_custom_cluster(
                     cluster,
                     standard_ids=standard_ids,
+                    title=title,
                     description=description,
                     is_shared=is_shared,
                     search_context=search_context,
@@ -154,16 +175,26 @@ def custom_cluster_detail_api(request, cluster_id: str):
                     acting_user=user,
                 )
             else:
+                update_fields = []
+                if title is not None:
+                    cluster.name = title
+                    update_fields.append('name')
                 if description is not None:
                     cluster.description = description
+                    update_fields.append('description')
                 if is_shared is not None:
                     cluster.is_shared = bool(is_shared)
+                    update_fields.append('is_shared')
                 if search_context is not None:
                     cluster.search_context = search_context
-                cluster.save(update_fields=['description', 'is_shared', 'search_context'])
+                    update_fields.append('search_context')
+                if update_fields:
+                    cluster.save(update_fields=update_fields)
 
             cluster.refresh_from_db()
-            return view.success_response(view.serialize_cluster(cluster, include_members=True))
+            return view.success_response(
+                view.serialize_cluster(cluster, include_members=True, current_user=user)
+            )
 
         # DELETE
         view.ensure_cluster_owner(cluster, user)
