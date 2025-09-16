@@ -4,6 +4,8 @@ Secure API views for embeddings visualization with proper validation and caching
 from typing import Dict, List, Optional, Any
 from uuid import UUID
 import json
+import os
+import threading
 from django.http import JsonResponse
 from django.core.exceptions import ValidationError
 from django.db.models import Q, Avg
@@ -29,6 +31,90 @@ from .utils import _categorize_theme_importance
 
 logger = logging.getLogger(__name__)
 
+_threading_lock = threading.Lock()
+_configured_threading_layer: Optional[str] = None
+_numba_disabled = False
+
+
+def ensure_numba_threading_layer(preferred: Optional[str] = None) -> Optional[str]:
+    """Ensure UMAP/Numba uses a threadsafe backend, falling back as needed."""
+    global _configured_threading_layer, _numba_disabled
+    if _configured_threading_layer:
+        if _configured_threading_layer == 'default':
+            # Treat legacy "default" configuration as effectively disabled so callers fall back.
+            return 'disabled'
+        return _configured_threading_layer
+    if _numba_disabled:
+        return 'disabled'
+
+    with _threading_lock:
+        if _configured_threading_layer:
+            return _configured_threading_layer
+
+        try:
+            from umap.umap_ import set_numba_threading_layer
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.debug(f"Unable to import set_numba_threading_layer: {exc}")
+            os.environ.setdefault('NUMBA_DISABLE_JIT', '1')
+            try:
+                import numba
+            except Exception as import_exc:  # pragma: no cover - numba missing
+                logger.error(f"Numba import failed during fallback: {import_exc}")
+            else:
+                numba.config.DISABLE_JIT = True
+            _numba_disabled = True
+            _configured_threading_layer = 'disabled'
+            logger.warning("Proceeding without numba threading layer support; advanced projections disabled")
+            return _configured_threading_layer
+
+        candidates: List[str] = []
+        if preferred:
+            candidates.append(preferred)
+        env_layer = os.environ.get('NUMBA_THREADING_LAYER')
+        if env_layer:
+            candidates.append(env_layer)
+        candidates.extend(['tbb', 'omp', 'workqueue'])
+
+        seen = set()
+        for layer in candidates:
+            normalized = (layer or '').strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            try:
+                set_numba_threading_layer(normalized)
+                logger.info(f"Configured numba threading layer: {normalized}")
+                _configured_threading_layer = normalized
+                return _configured_threading_layer
+            except ValueError as exc:
+                message = str(exc).lower()
+                if 'already set' in message or 'set to' in message:
+                    logger.debug(f"Numba threading layer already set: {normalized}")
+                    _configured_threading_layer = normalized
+                    return _configured_threading_layer
+                logger.debug(f"Numba threading layer {normalized} unavailable: {exc}")
+            except Exception as exc:  # pragma: no cover - best effort fallback
+                logger.debug(f"Failed to set numba threading layer {normalized}: {exc}")
+
+        try:
+            import numba
+        except Exception as exc:  # pragma: no cover - numba missing/unavailable
+            logger.error(f"Failed to import numba for fallback mode: {exc}")
+        else:
+            os.environ.setdefault('NUMBA_DISABLE_JIT', '1')
+            numba.config.DISABLE_JIT = True
+            _numba_disabled = True
+            _configured_threading_layer = 'disabled'
+            logger.warning("Numba JIT disabled; running UMAP in pure Python mode")
+            return _configured_threading_layer
+
+        # If numba is unavailable, degrade gracefully by disabling advanced projections
+        os.environ.setdefault('NUMBA_DISABLE_JIT', '1')
+        _numba_disabled = True
+        _configured_threading_layer = 'disabled'
+        logger.warning("Numba unavailable; falling back to basic embedding projections")
+        return _configured_threading_layer
+
 
 class EmbeddingsAPIView(BaseAPIView):
     """Base class for embeddings-related API views"""
@@ -46,13 +132,21 @@ class EmbeddingsAPIView(BaseAPIView):
             logger.info(f"Cache MISS for key: {cache_key} - executing calculation function")
             try:
                 data = calculation_func()
-                cache.set(cache_key, data, ttl)
-                logger.info(f"Cache SET for key: {cache_key} - data calculated and cached")
+                if isinstance(data, dict) and data.get('error'):
+                    logger.warning(f"Skipping cache set for key {cache_key} due to error: {data.get('error')}")
+                else:
+                    cache.set(cache_key, data, ttl)
+                    logger.info(f"Cache SET for key: {cache_key} - data calculated and cached")
             except Exception as e:
                 logger.error(f"Error calculating data for cache key {cache_key}: {e}")
                 data = {}
         else:
             logger.info(f"Cache HIT for key: {cache_key} - returning cached data")
+            if isinstance(data, dict) and data.get('error'):
+                logger.warning(f"Cached data for key {cache_key} contains error '{data.get('error')}', clearing and recalculating")
+                cache.delete(cache_key)
+                return self.get_cached_or_calculate(cache_key, calculation_func, ttl)
+
             # Check if cached data looks like it has problematic cluster counts
             if isinstance(data, dict) and 'clusters' in data:
                 cluster_count = len(data.get('clusters', []))
@@ -342,8 +436,10 @@ def embeddings_visualization_data_api(request):
             logger.info(f"Processing {len(embeddings_matrix)} embeddings with shape {embeddings_matrix.shape}")
             
             small_selection = bool(standard_ids) and len(embeddings_matrix) <= 10
+            
+            threading_layer = ensure_numba_threading_layer()
 
-            if small_selection:
+            if small_selection or threading_layer == 'disabled':
                 logger.info("Using simplified projection for small custom selection")
                 if viz_mode == '3d':
                     if embeddings_matrix.shape[1] >= 3:
@@ -938,6 +1034,7 @@ def embeddings_network_graph_api(request):
                 }
             
             embeddings_matrix = np.array(embeddings_matrix)
+            threading_layer = ensure_numba_threading_layer()
             
             if manual_cluster_labels:
                 color_palette = [
@@ -1066,35 +1163,58 @@ def embeddings_network_graph_api(request):
             # Perform clustering to identify concepts
             try:
                 import umap
-                import hdbscan
                 from sklearn.metrics.pairwise import cosine_similarity
                 
-                # UMAP for dimensionality reduction
-                n_samples = len(embeddings_matrix)
-                import math
-                adaptive_n_neighbors = min(max(5, int(math.sqrt(n_samples))), 30, n_samples - 1)
-                
-                umap_reducer = umap.UMAP(
-                    n_components=2,
-                    n_neighbors=adaptive_n_neighbors,
-                    min_dist=0.1,
-                    metric='cosine',
-                    random_state=42
-                )
-                umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
-                
-                # HDBSCAN clustering to identify concepts - use same params as scatter plot
-                # Use cluster_size directly as min_cluster_size for consistency
-                min_cluster_size = max(2, cluster_size)  # Same as scatter plot
-                min_samples = max(1, min_cluster_size // 2)  # Same as scatter plot
-                
-                clusterer = hdbscan.HDBSCAN(
-                    min_cluster_size=min_cluster_size,
-                    min_samples=min_samples,
-                    metric='euclidean',
-                    cluster_selection_epsilon=epsilon  # Use epsilon from request
-                )
-                cluster_labels = clusterer.fit_predict(umap_embeddings)
+                if threading_layer == 'disabled':
+                    logger.warning("Numba threading unavailable; using direct embedding projection for network graph")
+                    if embeddings_matrix.shape[1] >= 2:
+                        umap_embeddings = embeddings_matrix[:, :2]
+                    else:
+                        umap_embeddings = np.pad(
+                            embeddings_matrix,
+                            ((0, 0), (0, max(0, 2 - embeddings_matrix.shape[1]))),
+                            mode='constant'
+                        )
+                else:
+                    # UMAP for dimensionality reduction
+                    n_samples = len(embeddings_matrix)
+                    import math
+                    adaptive_n_neighbors = min(max(5, int(math.sqrt(n_samples))), 30, n_samples - 1)
+                    
+                    umap_reducer = umap.UMAP(
+                        n_components=2,
+                        n_neighbors=adaptive_n_neighbors,
+                        min_dist=0.1,
+                        metric='cosine',
+                        random_state=42
+                    )
+                    umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
+
+                use_hdbscan = threading_layer != 'disabled'
+                if use_hdbscan:
+                    import hdbscan
+                    # HDBSCAN clustering to identify concepts - use same params as scatter plot
+                    # Use cluster_size directly as min_cluster_size for consistency
+                    min_cluster_size = max(2, cluster_size)  # Same as scatter plot
+                    min_samples = max(1, min_cluster_size // 2)  # Same as scatter plot
+
+                    clusterer = hdbscan.HDBSCAN(
+                        min_cluster_size=min_cluster_size,
+                        min_samples=min_samples,
+                        metric='euclidean',
+                        cluster_selection_epsilon=epsilon  # Use epsilon from request
+                    )
+                    cluster_labels = clusterer.fit_predict(umap_embeddings)
+                else:
+                    logger.info("Using KMeans fallback clustering for network graph")
+                    cluster_labels = _fallback_kmeans_clustering(
+                        umap_embeddings,
+                        len(valid_standards),
+                        max(cluster_size, 3),
+                        logger
+                    )
+
+                cluster_labels = np.asarray(cluster_labels)
                 
                 # Build enhanced network graph with core vs state-specific analysis
                 nodes = []
@@ -1114,7 +1234,11 @@ def embeddings_network_graph_api(request):
                 all_states = set(std.state.code for std in valid_standards if std.state)
                 
                 # Get unique clusters (excluding noise -1)
-                unique_clusters = [int(c) for c in set(cluster_labels) if c != -1]
+                unique_clusters = [int(c) for c in set(cluster_labels.tolist()) if c != -1]
+                if not unique_clusters:
+                    logger.warning("No clusters returned; assigning all standards to a single cluster for network graph")
+                    cluster_labels = np.zeros(len(valid_standards), dtype=int)
+                    unique_clusters = [0]
                 
                 # Analyze each cluster for state coverage
                 cluster_analysis = {}
@@ -2855,6 +2979,106 @@ def embeddings_cluster_matrix_api(request):
             
             embeddings_matrix = np.array(embeddings_matrix)
             logger.info(f"Calculating topic coverage matrix for {len(embeddings_matrix)} embeddings")
+
+            if manual_labels:
+                cluster_objects = TopicCluster.objects.filter(id__in=manual_labels.keys())
+                cluster_name_map = {str(cluster.id): cluster.name for cluster in cluster_objects}
+
+                standards_by_id = {str(std.id): std for std in valid_standards}
+                total_state_counts = Counter(
+                    std.state.code if std.state else 'Unknown'
+                    for std in valid_standards
+                )
+                state_codes = sorted(total_state_counts.keys())
+
+                topic_names = []
+                topic_metadata = []
+                coverage_rows = []
+
+                for index, (cluster_id, member_ids) in enumerate(manual_labels.items()):
+                    cluster_standards = [standards_by_id[sid] for sid in member_ids if sid in standards_by_id]
+                    if not cluster_standards:
+                        continue
+
+                    state_counts = Counter(
+                        std.state.code if std.state else 'Unknown'
+                        for std in cluster_standards
+                    )
+
+                    cluster_name = cluster_name_map.get(cluster_id, f'Cluster {index + 1}')
+                    topic_names.append(cluster_name)
+                    topic_metadata.append({
+                        'cluster_id': cluster_id,
+                        'name': cluster_name,
+                        'total_standards': len(cluster_standards),
+                        'states_covered': len([code for code in state_counts if total_state_counts.get(code, 0)]),
+                        'state_breakdown': {
+                            code: {
+                                'assigned': state_counts.get(code, 0),
+                                'total': total_state_counts.get(code, 0)
+                            }
+                            for code in state_codes if total_state_counts.get(code, 0)
+                        },
+                        'sample_standards': [
+                            (std.title or std.description or '')[:80]
+                            for std in cluster_standards[:5]
+                        ]
+                    })
+                    coverage_rows.append(state_counts)
+
+                assigned_ids = {sid for ids in manual_labels.values() for sid in ids}
+                unassigned = [std for std in valid_standards if str(std.id) not in assigned_ids]
+                if unassigned:
+                    state_counts = Counter(
+                        std.state.code if std.state else 'Unknown'
+                        for std in unassigned
+                    )
+                    topic_names.append('Unassigned Standards')
+                    topic_metadata.append({
+                        'cluster_id': 'unassigned',
+                        'name': 'Unassigned Standards',
+                        'total_standards': len(unassigned),
+                        'states_covered': len([code for code in state_counts if total_state_counts.get(code, 0)]),
+                        'state_breakdown': {
+                            code: {
+                                'assigned': state_counts.get(code, 0),
+                                'total': total_state_counts.get(code, 0)
+                            }
+                            for code in state_codes if total_state_counts.get(code, 0)
+                        },
+                        'sample_standards': [
+                            (std.title or std.description or '')[:80]
+                            for std in unassigned[:5]
+                        ]
+                    })
+                    coverage_rows.append(state_counts)
+
+                if not state_codes:
+                    state_codes = ['Unknown']
+                    total_state_counts['Unknown'] = len(valid_standards)
+
+                coverage_matrix = []
+                for state_counts in coverage_rows:
+                    row = []
+                    for code in state_codes:
+                        total_for_state = total_state_counts.get(code, 0)
+                        if total_for_state <= 0:
+                            row.append(0.0)
+                        else:
+                            row.append(round(state_counts.get(code, 0) / total_for_state, 3))
+                    coverage_matrix.append(row)
+
+                return {
+                    'topic_names': topic_names,
+                    'state_codes': state_codes,
+                    'coverage_matrix': coverage_matrix,
+                    'topic_metadata': topic_metadata,
+                    'total_topics': len(topic_names),
+                    'total_states': len(state_codes),
+                    'total_standards': len(valid_standards)
+                }
+
+            threading_layer = ensure_numba_threading_layer()
             
             # Perform same UMAP + HDBSCAN as visualization
             try:
@@ -2869,15 +3093,26 @@ def embeddings_cluster_matrix_api(request):
                     adaptive_min_dist = 0.05
                 else:
                     adaptive_min_dist = 0.1
-                
-                umap_reducer = umap.UMAP(
-                    n_components=2,
-                    n_neighbors=adaptive_n_neighbors,
-                    min_dist=adaptive_min_dist,
-                    metric='cosine',
-                    random_state=42
-                )
-                umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
+
+                if threading_layer == 'disabled':
+                    logger.warning("Numba threading unavailable; using direct embedding projection for topic coverage matrix")
+                    if embeddings_matrix.shape[1] >= 2:
+                        umap_embeddings = embeddings_matrix[:, :2]
+                    else:
+                        umap_embeddings = np.pad(
+                            embeddings_matrix,
+                            ((0, 0), (0, max(0, 2 - embeddings_matrix.shape[1]))),
+                            mode='constant'
+                        )
+                else:
+                    umap_reducer = umap.UMAP(
+                        n_components=2,
+                        n_neighbors=adaptive_n_neighbors,
+                        min_dist=adaptive_min_dist,
+                        metric='cosine',
+                        random_state=42
+                    )
+                    umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
                 
                 # Phase 1: HDBSCAN with min_samples
                 min_cluster_size = max(2, cluster_size)
@@ -2890,106 +3125,180 @@ def embeddings_cluster_matrix_api(request):
                     cluster_selection_epsilon=epsilon
                 )
                 cluster_labels = clusterer.fit_predict(umap_embeddings)
-                
-                # Get unique cluster IDs (excluding noise -1)
+
                 unique_clusters = [c for c in set(cluster_labels) if c != -1]
                 unique_clusters.sort()
-                
+
                 if len(unique_clusters) < 2:
-                    return {
-                        'topic_names': [],
-                        'state_codes': [],
-                        'coverage_matrix': [],
-                        'error': f'Only {len(unique_clusters)} topics found - need at least 2 for coverage analysis'
-                    }
-                
-                logger.info(f"Found {len(unique_clusters)} topic clusters for coverage matrix")
-                
-                # Group standards by cluster and state
-                cluster_info = {}
-                states_in_data = set()
-                
-                for cluster_id in unique_clusters:
-                    cluster_mask = cluster_labels == cluster_id
-                    cluster_standards = [valid_standards[i] for i in range(len(valid_standards)) if cluster_mask[i]]
-                    
-                    # Generate cluster name using existing theme extraction
-                    cluster_name = _extract_cluster_theme(cluster_standards, cluster_id)
-                    cluster_info[cluster_id] = {
-                        'name': cluster_name,
-                        'standards_by_state': {},
-                        'total_standards': len(cluster_standards)
-                    }
-                    
-                    # Group standards by state
-                    for standard in cluster_standards:
-                        state_code = standard.state.code
-                        states_in_data.add(state_code)
-                        
-                        if state_code not in cluster_info[cluster_id]['standards_by_state']:
-                            cluster_info[cluster_id]['standards_by_state'][state_code] = []
-                        cluster_info[cluster_id]['standards_by_state'][state_code].append(standard)
-                
-                # Sort states for consistent ordering
-                state_codes = sorted(list(states_in_data))
-                
-                # Calculate coverage matrix: Topics (rows) × States (columns)
-                coverage_matrix = []
-                topic_names = []
-                topic_metadata = []
-                
-                for cluster_id in unique_clusters:
-                    info = cluster_info[cluster_id]
-                    topic_names.append(info['name'])
-                    
-                    # Calculate coverage for each state
-                    coverage_row = []
-                    max_coverage = max([len(info['standards_by_state'].get(state, [])) for state in state_codes] + [1])
-                    
-                    for state_code in state_codes:
-                        state_standards = info['standards_by_state'].get(state_code, [])
-                        # Normalize coverage as percentage of maximum coverage for this topic
-                        coverage = len(state_standards) / max_coverage if max_coverage > 0 else 0
-                        coverage_row.append(round(coverage, 3))
-                    
-                    coverage_matrix.append(coverage_row)
-                    
-                    # Create metadata for tooltips
-                    sample_standards = []
-                    for state in state_codes[:3]:  # Sample from first few states
-                        state_standards = info['standards_by_state'].get(state, [])
-                        if state_standards:
-                            sample_standards.extend([
-                                f"{state}: {(s.title or s.description or f'Standard {str(s.id)[:8]}')[:50]}..."
-                                for s in state_standards[:2]
-                            ])
-                    
-                    topic_metadata.append({
-                        'cluster_id': int(cluster_id),
-                        'name': info['name'],
-                        'total_standards': int(info['total_standards']),
-                        'states_covered': int(len([s for s in state_codes if info['standards_by_state'].get(s)])),
-                        'sample_standards': sample_standards[:5]  # Limit samples
-                    })
-                
-                return {
-                    'topic_names': topic_names,
-                    'state_codes': state_codes,
-                    'coverage_matrix': coverage_matrix,
-                    'topic_metadata': topic_metadata,
-                    'total_topics': int(len(unique_clusters)),
-                    'total_states': int(len(state_codes)),
-                    'total_standards': int(len(valid_standards))
-                }
-                
+                    raise ValueError('Insufficient clusters from HDBSCAN')
+
             except Exception as e:
                 logger.error(f"Topic coverage matrix calculation failed: {e}")
+
+                # Try KMeans fallback before subject-area summary
+                try:
+                    fallback_labels = _fallback_kmeans_clustering(
+                        embeddings_matrix,
+                        len(valid_standards),
+                        max(cluster_size, 3),
+                        logger
+                    )
+                    cluster_labels = np.asarray(fallback_labels)
+                    unique_clusters = [c for c in sorted(set(cluster_labels.tolist())) if c != -1]
+                    if not unique_clusters:
+                        raise ValueError('KMeans fallback produced no clusters')
+                except Exception as clustering_error:
+                    logger.error(f"KMeans fallback failed: {clustering_error}")
+
+                    # Subject-area coverage as last resort
+                    try:
+                        coverage_summary: Dict[str, Dict[str, int]] = {}
+                        state_codes = set()
+                        for standard in valid_standards:
+                            state_code = standard.state.code if standard.state else 'Unknown'
+                            state_codes.add(state_code)
+                            subject_key = standard.subject_area.name if standard.subject_area else 'General'
+                            coverage_summary.setdefault(subject_key, {})
+                            coverage_summary[subject_key][state_code] = coverage_summary[subject_key].get(state_code, 0) + 1
+
+                        state_codes = sorted(state_codes)
+                        if not coverage_summary:
+                            raise ValueError('No coverage summary available')
+
+                        topic_names = []
+                        coverage_matrix = []
+                        topic_metadata = []
+                        for subject, counts in coverage_summary.items():
+                            topic_names.append(subject)
+                            max_count = max(counts.values()) if counts else 1
+                            row = [round(counts.get(code, 0) / max_count if max_count else 0, 3) for code in state_codes]
+                            coverage_matrix.append(row)
+                            topic_metadata.append({
+                                'cluster_id': subject,
+                                'name': subject,
+                                'total_standards': int(sum(counts.values())),
+                                'states_covered': int(len(counts)),
+                                'sample_standards': []
+                            })
+
+                        return {
+                            'topic_names': topic_names,
+                            'state_codes': state_codes,
+                            'coverage_matrix': coverage_matrix,
+                            'topic_metadata': topic_metadata,
+                            'total_topics': len(topic_names),
+                            'total_states': len(state_codes),
+                            'total_standards': len(valid_standards),
+                            'warning': f'Topic clustering failed ({str(e)}); using subject-area coverage instead'
+                        }
+                    except Exception as fallback_error:
+                        logger.error(f"Fallback coverage summary failed: {fallback_error}")
+                        total_by_state = Counter(
+                            standard.state.code if standard.state else 'Unknown'
+                            for standard in valid_standards
+                        )
+                        state_codes = sorted(total_by_state.keys()) or ['Unknown']
+                        coverage_matrix = [[1.0 for _ in state_codes]]
+                        return {
+                            'topic_names': ['All Standards'],
+                            'state_codes': state_codes,
+                            'coverage_matrix': coverage_matrix,
+                            'topic_metadata': [{
+                                'cluster_id': 'all',
+                                'name': 'All Standards',
+                                'total_standards': len(valid_standards),
+                                'states_covered': len(state_codes),
+                                'state_breakdown': {
+                                    code: {
+                                        'assigned': total_by_state.get(code, 0),
+                                        'total': total_by_state.get(code, 0)
+                                    }
+                                    for code in state_codes
+                                },
+                                'sample_standards': []
+                            }],
+                            'total_topics': 1,
+                            'total_states': len(state_codes),
+                            'total_standards': len(valid_standards),
+                            'warning': f'Topic clustering failed ({str(e)}); reverting to aggregate coverage summary'
+                        }
+
+            # Build coverage from cluster labels (HDBSCAN or fallback)
+            total_state_counts = Counter(
+                std.state.code if std.state else 'Unknown'
+                for std in valid_standards
+            )
+            state_codes = sorted(total_state_counts.keys()) or ['Unknown']
+            if state_codes == ['Unknown']:
+                total_state_counts['Unknown'] = len(valid_standards)
+
+            cluster_info = {}
+            for cluster_id in unique_clusters:
+                cluster_mask = cluster_labels == cluster_id
+                cluster_standards = [valid_standards[i] for i in range(len(valid_standards)) if cluster_mask[i]]
+                if not cluster_standards:
+                    continue
+
+                cluster_name = _extract_cluster_theme(cluster_standards, cluster_id)
+                counts = Counter(
+                    std.state.code if std.state else 'Unknown'
+                    for std in cluster_standards
+                )
+
+                cluster_info[int(cluster_id)] = {
+                    'name': cluster_name,
+                    'counts': counts,
+                    'standards': cluster_standards
+                }
+
+            if not cluster_info:
                 return {
                     'topic_names': [],
-                    'state_codes': [],
+                    'state_codes': state_codes,
                     'coverage_matrix': [],
-                    'error': f'Topic clustering failed: {str(e)}'
+                    'error': 'No clusters available for coverage analysis'
                 }
+
+            topic_names = []
+            coverage_matrix = []
+            topic_metadata = []
+
+            for cluster_id, info in cluster_info.items():
+                topic_names.append(info['name'])
+                counts = info['counts']
+                row = []
+                state_breakdown = {}
+                for code in state_codes:
+                    total_for_state = total_state_counts.get(code, 0)
+                    assigned = counts.get(code, 0)
+                    state_breakdown[code] = {
+                        'assigned': assigned,
+                        'total': total_for_state
+                    }
+                    row.append(round(assigned / total_for_state, 3) if total_for_state else 0.0)
+                coverage_matrix.append(row)
+                topic_metadata.append({
+                    'cluster_id': cluster_id,
+                    'name': info['name'],
+                    'total_standards': len(info['standards']),
+                    'states_covered': len([code for code in state_codes if counts.get(code, 0)]),
+                    'state_breakdown': state_breakdown,
+                    'sample_standards': [
+                        (std.title or std.description or '')[:80]
+                        for std in info['standards'][:5]
+                    ]
+                })
+
+            return {
+                'topic_names': topic_names,
+                'state_codes': state_codes,
+                'coverage_matrix': coverage_matrix,
+                'topic_metadata': topic_metadata,
+                'total_topics': len(topic_names),
+                'total_states': len(state_codes),
+                'total_standards': len(valid_standards)
+            }
+
         
         if cache_key:
             matrix_data = view.get_cached_or_calculate(cache_key, calculate_cluster_matrix)

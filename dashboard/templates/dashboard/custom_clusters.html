@@ -45,24 +45,6 @@
                     <div class="text-muted small">Loading clusters…</div>
                 </div>
                 <div class="mt-3">
-                    <div class="mb-2">
-                        <label for="cluster-grade-filter" class="form-label small mb-1">Grade Level</label>
-                        <select class="form-select form-select-sm" id="cluster-grade-filter">
-                            <option value="">All Grades</option>
-                            {% for grade in grade_levels %}
-                            <option value="{{ grade.grade_numeric }}">{{ grade.grade }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                    <div class="mb-3">
-                        <label for="cluster-subject-filter" class="form-label small mb-1">Subject Area</label>
-                        <select class="form-select form-select-sm" id="cluster-subject-filter">
-                            <option value="">All Subjects</option>
-                            {% for subject in subject_areas %}
-                            <option value="{{ subject.id }}">{{ subject.name }}</option>
-                            {% endfor %}
-                        </select>
-                    </div>
                     <button class="btn btn-success w-100" id="compare-selected-btn" disabled>
                         <i class="fas fa-project-diagram"></i> Compare Selected (<span id="selected-count">0</span>)
                     </button>
@@ -84,6 +66,29 @@
             </div>
         </div>
         <div class="col-lg-8">
+            <div class="custom-cluster-layout mb-3 d-flex flex-wrap gap-3 align-items-end">
+                <div class="flex-grow-1">
+                    <label for="cluster-grade-filter" class="form-label small mb-1">Grade Level</label>
+                    <select class="form-select" id="cluster-grade-filter">
+                        <option value="">All Grades</option>
+                        {% for grade in grade_levels %}
+                        <option value="{{ grade.grade_numeric }}">{{ grade.grade }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="flex-grow-1">
+                    <label for="cluster-subject-filter" class="form-label small mb-1">Subject Area</label>
+                    <select class="form-select" id="cluster-subject-filter">
+                        <option value="">All Subjects</option>
+                        {% for subject in subject_areas %}
+                        <option value="{{ subject.id }}">{{ subject.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="text-muted small">
+                    Adjust filters to compare selected clusters against the broader set of standards in this scope.
+                </div>
+            </div>
             <div class="custom-cluster-layout cluster-detail" id="cluster-detail">
                 <h4 class="mb-3" id="cluster-detail-title">Select a cluster to begin</h4>
                 <div id="cluster-placeholder" class="text-muted">

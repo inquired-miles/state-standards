@@ -414,10 +414,12 @@
         syncHiddenFilters();
         updateVizModeButtons();
 
+        const manualMap = buildManualClusterMap(clusters);
+
         if (window.dashboardEmbeddings) {
-            window.dashboardEmbeddings.setStandardFilter(standardIds);
+            window.dashboardEmbeddings.setStandardFilter([]);
             if (typeof window.dashboardEmbeddings.setManualClusterMap === 'function') {
-                window.dashboardEmbeddings.setManualClusterMap(buildManualClusterMap(clusters));
+                window.dashboardEmbeddings.setManualClusterMap(manualMap);
             }
         }
 
