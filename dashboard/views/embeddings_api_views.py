@@ -270,99 +270,94 @@ def embeddings_visualization_data_api(request):
             embeddings_matrix = np.array(embeddings_matrix)
             logger.info(f"Processing {len(embeddings_matrix)} embeddings with shape {embeddings_matrix.shape}")
             
-            # Perform UMAP dimensionality reduction (simplified)
-            try:
-                # Set n_components based on visualization mode
-                n_components = 3 if viz_mode == '3d' else 2
-                
-                # Phase 1: Adaptive UMAP parameters for better clustering
-                n_samples = len(embeddings_matrix)
-                
-                # Adaptive n_neighbors: smaller datasets need fewer neighbors for local structure
-                # Formula: min(max(5, sqrt(n_samples)), 50) capped by dataset size
-                import math
-                adaptive_n_neighbors = min(max(5, int(math.sqrt(n_samples))), 50, n_samples - 1)
-                
-                # Adaptive min_dist: smaller datasets benefit from tighter clustering
-                if n_samples < 100:
-                    adaptive_min_dist = 0.01  # Tight clusters for small datasets
-                elif n_samples < 500:
-                    adaptive_min_dist = 0.05  # Balanced for medium datasets
-                else:
-                    adaptive_min_dist = 0.1   # Standard for large datasets
-                
-                logger.info(f"UMAP adaptive parameters: n_samples={n_samples}, n_neighbors={adaptive_n_neighbors}, min_dist={adaptive_min_dist}")
-                
-                umap_reducer = umap.UMAP(
-                    n_components=n_components,
-                    n_neighbors=adaptive_n_neighbors,
-                    min_dist=adaptive_min_dist,
-                    metric='cosine',
-                    random_state=42
-                )
-                umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
-                logger.info(f"UMAP completed successfully")
-                
-                # Basic check for embedding quality
-                embedding_variance = np.var(umap_embeddings, axis=0).mean()
-                logger.info(f"UMAP embedding variance: {embedding_variance:.4f}")
-                
-                if embedding_variance < 0.01:
-                    logger.warning("Low UMAP embedding variance - may affect clustering quality")
-                
-            except Exception as e:
-                logger.error(f"UMAP failed: {e}")
-                # Fallback based on visualization mode
+            small_selection = bool(standard_ids) and len(embeddings_matrix) <= 10
+
+            if small_selection:
+                logger.info("Using simplified projection for small custom selection")
                 if viz_mode == '3d':
                     if embeddings_matrix.shape[1] >= 3:
                         umap_embeddings = embeddings_matrix[:, :3]
                     else:
-                        # Pad with zeros if needed
                         umap_embeddings = np.pad(embeddings_matrix[:, :2], ((0, 0), (0, 1)), mode='constant')
                 else:
-                    umap_embeddings = embeddings_matrix[:, :2]
-            
-            # Perform HDBSCAN clustering with Phase 1 improvements
-            try:
-                # Use cluster_size directly as min_cluster_size (intuitive behavior)
-                # Smaller cluster_size = smaller min_cluster_size = MORE clusters
-                # Larger cluster_size = larger min_cluster_size = FEWER clusters
-                min_cluster_size = max(2, cluster_size)  # Direct control, minimum of 2
-                
-                # Phase 1: Add min_samples parameter for better noise handling
-                # min_samples controls how conservative the clustering is
-                # Lower min_samples = more aggressive clustering (finds more clusters)
-                min_samples = max(1, min_cluster_size // 2)
-                
-                logger.info(f"HDBSCAN parameters: min_cluster_size={min_cluster_size}, min_samples={min_samples}, epsilon={epsilon}")
-                
-                clusterer = hdbscan.HDBSCAN(
-                    min_cluster_size=min_cluster_size,
-                    min_samples=min_samples,
-                    metric='euclidean',
-                    cluster_selection_epsilon=epsilon
-                )
-                cluster_labels = clusterer.fit_predict(umap_embeddings)
-                
-                n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
-                n_noise = (cluster_labels == -1).sum()
-                n_total = len(embeddings_matrix)  # Add this back
-                
-                logger.info(f"HDBSCAN clustering: {n_clusters} clusters, {n_noise} noise points")
-                
-                # Log cluster size distribution for debugging
-                from collections import Counter
-                cluster_sizes = Counter(cluster_labels)
-                non_noise_sizes = [size for label, size in cluster_sizes.items() if label != -1]
-                if non_noise_sizes:
-                    logger.info(f"Cluster sizes: min={min(non_noise_sizes)}, max={max(non_noise_sizes)}, avg={sum(non_noise_sizes)/len(non_noise_sizes):.1f}")
-                    
-                    # Check for clustering quality issues
+                    if embeddings_matrix.shape[1] >= 2:
+                        umap_embeddings = embeddings_matrix[:, :2]
+                    else:
+                        umap_embeddings = np.pad(embeddings_matrix[:, :1], ((0, 0), (0, 1)), mode='constant')
+                cluster_labels = np.zeros(len(embeddings_matrix), dtype=int)
+            else:
+                try:
+                    n_components = 3 if viz_mode == '3d' else 2
+                    n_samples = len(embeddings_matrix)
+                    import math
+                    adaptive_n_neighbors = min(max(5, int(math.sqrt(n_samples))), 50, n_samples - 1)
+                    if n_samples < 100:
+                        adaptive_min_dist = 0.01
+                    elif n_samples < 500:
+                        adaptive_min_dist = 0.05
+                    else:
+                        adaptive_min_dist = 0.1
+                    logger.info(f"UMAP adaptive parameters: n_samples={n_samples}, n_neighbors={adaptive_n_neighbors}, min_dist={adaptive_min_dist}")
+                    umap_reducer = umap.UMAP(
+                        n_components=n_components,
+                        n_neighbors=adaptive_n_neighbors,
+                        min_dist=adaptive_min_dist,
+                        metric='cosine',
+                        random_state=42
+                    )
+                    umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
+                    logger.info("UMAP completed successfully")
+                    embedding_variance = np.var(umap_embeddings, axis=0).mean()
+                    logger.info(f"UMAP embedding variance: {embedding_variance:.4f}")
+                    if embedding_variance < 0.01:
+                        logger.warning("Low UMAP embedding variance - may affect clustering quality")
+                except Exception as e:
+                    logger.error(f"UMAP failed: {e}")
+                    if viz_mode == '3d':
+                        if embeddings_matrix.shape[1] >= 3:
+                            umap_embeddings = embeddings_matrix[:, :3]
+                        else:
+                            umap_embeddings = np.pad(embeddings_matrix[:, :2], ((0, 0), (0, 1)), mode='constant')
+                    else:
+                        umap_embeddings = embeddings_matrix[:, :2]
+
+                try:
+                    min_cluster_size = max(2, cluster_size)
+                    min_samples = max(1, min_cluster_size // 2)
+                    logger.info(f"HDBSCAN parameters: min_cluster_size={min_cluster_size}, min_samples={min_samples}, epsilon={epsilon}")
+                    clusterer = hdbscan.HDBSCAN(
+                        min_cluster_size=min_cluster_size,
+                        min_samples=min_samples,
+                        metric='euclidean',
+                        cluster_selection_epsilon=epsilon
+                    )
+                    cluster_labels = clusterer.fit_predict(umap_embeddings)
+                    n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+                    n_noise = (cluster_labels == -1).sum()
+                    logger.info(f"HDBSCAN clustering: {n_clusters} clusters, {n_noise} noise points")
+                    from collections import Counter
+                    cluster_sizes = Counter(cluster_labels)
+                    non_noise_sizes = [size for label, size in cluster_sizes.items() if label != -1]
+                    if non_noise_sizes:
+                        logger.info(f"Cluster sizes: min={min(non_noise_sizes)}, max={max(non_noise_sizes)}, avg={sum(non_noise_sizes)/len(non_noise_sizes):.1f}")
                     max_cluster_size = max(non_noise_sizes)
                     if max_cluster_size > n_total * 0.7:
                         logger.warning(f"Dominant cluster detected: {max_cluster_size}/{n_total} ({max_cluster_size/n_total:.1%})")
-                else:
-                    logger.warning("No valid clusters found - all points are noise")
+                except Exception as e:
+                    logger.error(f"HDBSCAN failed: {e}")
+                    # Try KMeans as a fallback clustering method when HDBSCAN blows up completely
+                    logger.info("HDBSCAN failed completely, trying KMeans fallback")
+                    cluster_labels = np.asarray(
+                        _fallback_kmeans_clustering(
+                            umap_embeddings,
+                            len(embeddings_matrix),
+                            cluster_size,
+                            logger,
+                        )
+                    )
+                    unique_labels = set(cluster_labels.tolist())
+                    n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+                    n_noise = int(np.sum(cluster_labels == -1))
                 
                 # Enhanced retry logic with min_samples adjustment
                 if n_clusters == 0 and len(embeddings_matrix) > 10:
@@ -392,13 +387,6 @@ def embeddings_visualization_data_api(request):
                         logger.info(f"Using retry clustering with {retry_n_clusters} clusters")
                     else:
                         logger.warning("Retry also failed, keeping original results")
-                
-            except Exception as e:
-                logger.error(f"HDBSCAN failed: {e}")
-                # Try KMeans as fallback clustering method
-                logger.info("HDBSCAN failed completely, trying KMeans fallback")
-                cluster_labels = _fallback_kmeans_clustering(umap_embeddings, len(embeddings_matrix), cluster_size, logger)
-            
             # First, identify weak clusters (less than 3 members)
             from collections import Counter
             cluster_sizes_check = Counter(cluster_labels)
@@ -443,6 +431,74 @@ def embeddings_visualization_data_api(request):
             
             # Generate real clusters from HDBSCAN results
             clusters = _generate_real_clusters(valid_standards, umap_embeddings, cluster_labels, state_colors, viz_mode)
+
+            # For explicitly selected standards with few items, synthesize a simple cluster
+            if standard_ids and not clusters and valid_standards:
+                from collections import Counter
+
+                # Calculate cluster center from embeddings
+                center = {
+                    'x': float(np.mean(umap_embeddings[:, 0]))
+                }
+                if umap_embeddings.shape[1] >= 2:
+                    center['y'] = float(np.mean(umap_embeddings[:, 1]))
+                if viz_mode == '3d' and umap_embeddings.shape[1] >= 3:
+                    center['z'] = float(np.mean(umap_embeddings[:, 2]))
+
+                # Estimate radius in 2D space
+                if umap_embeddings.shape[1] >= 2:
+                    distances = np.linalg.norm(
+                        umap_embeddings[:, :2] - np.array([center['x'], center.get('y', 0)]),
+                        axis=1
+                    )
+                    radius = float(np.max(distances)) if len(distances) else 0.0
+                else:
+                    radius = 0.0
+
+                state_distribution = Counter(
+                    std.state.code if std.state else 'Unknown' for std in valid_standards
+                )
+                key_topics = _extract_key_topics(valid_standards)[:8]
+
+                standards_details = []
+                for idx, standard in enumerate(valid_standards):
+                    display_title = standard.title or standard.description or f"Standard {str(standard.id)[:8]}"
+                    if len(display_title) > 80:
+                        display_title = display_title[:80] + '...'
+                    description = standard.description or "No description available"
+                    if len(description) > 200:
+                        description = description[:200] + '...'
+                    detail = {
+                        'id': str(standard.id),
+                        'title': display_title,
+                        'description': description,
+                        'state': standard.state.code if standard.state else 'Unknown',
+                        'state_name': standard.state.name if standard.state else 'Unknown',
+                        'subject_area': standard.subject_area.name if standard.subject_area else 'Unknown',
+                        'grade_levels': sorted(standard.grade_levels.values_list('grade_numeric', flat=True)) or [],
+                        'domain': getattr(standard, 'domain', ''),
+                        'cluster_id': 'manual'
+                    }
+                    if umap_embeddings.shape[1] >= 1:
+                        detail['x'] = float(umap_embeddings[idx, 0])
+                    if umap_embeddings.shape[1] >= 2:
+                        detail['y'] = float(umap_embeddings[idx, 1])
+                    if viz_mode == '3d' and umap_embeddings.shape[1] >= 3:
+                        detail['z'] = float(umap_embeddings[idx, 2])
+                    standards_details.append(detail)
+
+                clusters = [{
+                    'id': 0,
+                    'name': 'Selected Standards',
+                    'center': center,
+                    'radius': radius,
+                    'states': list(state_distribution.keys()),
+                    'key_topics': key_topics,
+                    'size': len(valid_standards),
+                    'standards_count': len(valid_standards),
+                    'state_distribution': dict(state_distribution),
+                    'standards': standards_details
+                }]
             
             # Calculate meaningful clustering statistics
             from collections import Counter
@@ -2311,6 +2367,44 @@ def embeddings_cluster_matrix_api(request):
                 standards = list(standards_query)
                 order_map = {sid: idx for idx, sid in enumerate(standard_ids)}
                 standards.sort(key=lambda s: order_map.get(str(s.id), 0))
+
+                if not standards:
+                    return {
+                        'topic_names': [],
+                        'state_codes': [],
+                        'coverage_matrix': [],
+                        'error': 'No standards found for coverage analysis'
+                    }
+
+                # Build simple state coverage matrix for selected standards
+                state_counts = {}
+                for standard in standards:
+                    state_code = standard.state.code if standard.state else 'Unknown'
+                    state_counts.setdefault(state_code, 0)
+                    state_counts[state_code] += 1
+
+                state_codes = sorted(state_counts.keys())
+                max_count = max(state_counts.values()) if state_counts else 1
+                coverage_row = [round(state_counts.get(code, 0) / max_count if max_count else 0, 3) for code in state_codes]
+
+                return {
+                    'topic_names': ['Selected Standards'],
+                    'state_codes': state_codes,
+                    'coverage_matrix': [coverage_row],
+                    'topic_metadata': [{
+                        'cluster_id': 0,
+                        'name': 'Selected Standards',
+                        'total_standards': len(standards),
+                        'states_covered': len(state_codes),
+                        'sample_standards': [
+                            f"{standard.state.code if standard.state else 'Unknown'}: {(standard.title or standard.description or '')[:80]}"
+                            for standard in standards[:5]
+                        ]
+                    }],
+                    'total_topics': 1,
+                    'total_states': len(state_codes),
+                    'total_standards': len(standards)
+                }
             else:
                 standards_query = Standard.objects.filter(
                     embedding__isnull=False
@@ -2838,30 +2932,4 @@ def _build_state_similarity_matrix(state_centroids: Dict[str, np.ndarray]) -> Di
         'matrix': similarity_matrix,
         'matrix_type': 'enhanced_state',
         'total_states': len(state_codes)
-    }
-    
-    similarity_matrix = []
-    
-    from sklearn.metrics.pairwise import cosine_similarity
-    
-    for i, state1 in enumerate(state_codes):
-        row = []
-        for j, state2 in enumerate(state_codes):
-            if i == j:
-                similarity = 1.0
-            else:
-                # Calculate cosine similarity between state centroids
-                centroid1 = state_centroids[state1].reshape(1, -1)
-                centroid2 = state_centroids[state2].reshape(1, -1)
-                similarity = float(cosine_similarity(centroid1, centroid2)[0][0])
-            
-            row.append(round(similarity, 3))
-        similarity_matrix.append(row)
-    
-    return {
-        'row_labels': state_codes,
-        'col_labels': state_codes,
-        'matrix': similarity_matrix,
-        'matrix_type': 'enhanced_state',
-        'total_states': int(len(state_codes))
     }

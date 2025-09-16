@@ -40,9 +40,32 @@
         <div class="col-lg-4 cluster-sidebar">
             <div class="custom-cluster-layout mb-3">
                 <h5 class="mb-2">Saved Clusters</h5>
-                <p class="text-muted small">Select an existing cluster to view details or start fresh with a semantic search.</p>
+                <p class="text-muted small">Select multiple clusters to compare their semantic coverage and relationships.</p>
                 <div class="cluster-list list-group" id="cluster-list">
                     <div class="text-muted small">Loading clusters…</div>
+                </div>
+                <div class="mt-3">
+                    <div class="mb-2">
+                        <label for="cluster-grade-filter" class="form-label small mb-1">Grade Level</label>
+                        <select class="form-select form-select-sm" id="cluster-grade-filter">
+                            <option value="">All Grades</option>
+                            {% for grade in grade_levels %}
+                            <option value="{{ grade.grade_numeric }}">{{ grade.grade }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label for="cluster-subject-filter" class="form-label small mb-1">Subject Area</label>
+                        <select class="form-select form-select-sm" id="cluster-subject-filter">
+                            <option value="">All Subjects</option>
+                            {% for subject in subject_areas %}
+                            <option value="{{ subject.id }}">{{ subject.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <button class="btn btn-success w-100" id="compare-selected-btn" disabled>
+                        <i class="fas fa-project-diagram"></i> Compare Selected (<span id="selected-count">0</span>)
+                    </button>
                 </div>
                 <button class="btn btn-primary w-100 mt-3" id="new-cluster-btn">
                     <i class="fas fa-plus"></i> Create Cluster from Search
@@ -68,7 +91,7 @@
                 </div>
                 <div id="cluster-summary" class="mt-3 d-none"></div>
                 <div id="cluster-visualizations" class="d-none">
-                    {% include "dashboard/partials/embeddings_visualizations.html" %}
+                    {% include "dashboard/partials/embeddings_visualizations.html" with simple_mode=True %}
                 </div>
             </div>
 
@@ -135,7 +158,7 @@
 <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
 <script src="{% static 'dashboard/js/semantic_search.js' %}"></script>
 <script src="{% static 'dashboard/js/embeddings_visualizations.js' %}"></script>
-<script src="{% static 'dashboard/js/custom_clusters.js' %}"></script>
+<script src="{% static 'dashboard/js/custom_clusters.js' %}?v=2"></script>
 <script>
     // Minimal bootstrapping; detailed logic will live in shared JS modules refactored from embeddings page
     document.addEventListener('DOMContentLoaded', () => {

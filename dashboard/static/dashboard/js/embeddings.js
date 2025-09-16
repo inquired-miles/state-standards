@@ -4,6 +4,7 @@
     }
 
     let standardIdFilter = [];
+    let manualClusterMap = {};
     let autoInit = true;
     let endpoints = {};
 
@@ -19,6 +20,9 @@
             }
         });
         standardIdFilter.forEach(id => params.append('standard_ids', id));
+        if (manualClusterMap && Object.keys(manualClusterMap).length) {
+            params.append('cluster_labels', JSON.stringify(manualClusterMap));
+        }
         return params;
     }
 
@@ -26,6 +30,12 @@
 
     window.dashboardEmbeddings = {
         setStandardFilter,
+        setManualClusterMap(map) {
+            manualClusterMap = map && typeof map === 'object' ? JSON.parse(JSON.stringify(map)) : {};
+        },
+        getManualClusterMap() {
+            return JSON.parse(JSON.stringify(manualClusterMap || {}));
+        },
         buildParams,
         getStandardFilter: () => [...standardIdFilter],
         setAutoInit(value) {

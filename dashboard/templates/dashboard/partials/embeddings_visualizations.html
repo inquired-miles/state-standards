@@ -1,4 +1,4 @@
-<div class="card mb-4">
+<div class="card mb-4 {% if simple_mode %}d-none{% endif %}" id="viz-explanation">
     <div class="card-body">
         <h5 class="card-title"><i class="fas fa-lightbulb text-warning"></i> How Educational Standards Clustering Works</h5>
         <div class="row">
@@ -34,7 +34,7 @@
     </div>
 </div>
 
-<div class="control-panel" id="embeddings-control-panel">
+<div class="control-panel {% if simple_mode %}d-none{% endif %}" id="embeddings-control-panel">
     <h5 class="mb-3"><i class="fas fa-sliders-h"></i> Clustering Controls</h5>
     
     <div class="preset-controls mb-4">
@@ -196,11 +196,13 @@
             Network Graph
         </button>
     </li>
+    {% if not simple_mode %}
     <li class="nav-item" role="presentation">
         <button class="nav-link" id="search-tab" data-bs-toggle="tab" data-bs-target="#search-pane" type="button" role="tab">
             Semantic Search
         </button>
     </li>
+    {% endif %}
 </ul>
 
 <div class="tab-content" id="viz-tab-content">
@@ -248,7 +250,6 @@
                 <div class="col-md-4 text-end">
                     <div class="btn-group" role="group">
                         <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadHeatMapData('topic')">Topic Coverage</button>
-                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadHeatMapData('enhanced_state')">State Coverage</button>
                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="loadHeatMapData('enhanced_state')">Enhanced State</button>
                     </div>
                 </div>
@@ -347,11 +348,13 @@
         </div>
     </div>
 
+    {% if not simple_mode %}
     <div class="tab-pane fade" id="search-pane" role="tabpanel">
         <div class="visualization-container">
             {% include 'dashboard/partials/semantic_search.html' with title='Semantic Concept Search' enable_selection=False mode='view' %}
         </div>
     </div>
+    {% endif %}
 </div>
 
 <div class="modal fade" id="clustering-help" tabindex="-1" aria-labelledby="clustering-help-label" aria-hidden="true">
