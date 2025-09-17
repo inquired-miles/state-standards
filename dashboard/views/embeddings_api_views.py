@@ -16,6 +16,7 @@ import umap
 import hdbscan
 from collections import Counter
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import PCA
 import re
 import nltk
 from nltk.tokenize import word_tokenize
@@ -246,6 +247,13 @@ def embeddings_visualization_data_api(request):
         viz_mode = request.GET.get('viz_mode', '2d')
         if viz_mode not in ['2d', '3d']:
             viz_mode = '2d'
+
+        refresh_cache_param = request.GET.get('refresh_cache')
+        force_refresh = False
+        if isinstance(refresh_cache_param, str):
+            normalized_refresh = refresh_cache_param.strip().lower()
+            if normalized_refresh in {'1', 'true', 'yes', 'force', 'refresh'}:
+                force_refresh = True
         
         # Create cache key for this specific request
         if standard_ids or manual_cluster_labels:
@@ -258,6 +266,9 @@ def embeddings_visualization_data_api(request):
         else:
             cache_key = f"embeddings_viz_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}_{viz_mode}"
             logger.info(f"Cache key: {cache_key} (cluster_size={cluster_size}, epsilon={epsilon})")
+            if force_refresh:
+                logger.info(f"Force refresh requested; clearing cache for key: {cache_key}")
+                cache.delete(cache_key)
 
         def calculate_visualization_data():
             # Determine standards to analyze
@@ -436,10 +447,12 @@ def embeddings_visualization_data_api(request):
             logger.info(f"Processing {len(embeddings_matrix)} embeddings with shape {embeddings_matrix.shape}")
             
             small_selection = bool(standard_ids) and len(embeddings_matrix) <= 10
-            
+
             threading_layer = ensure_numba_threading_layer()
 
-            if small_selection or threading_layer == 'disabled':
+            cluster_labels = None
+
+            if small_selection:
                 logger.info("Using simplified projection for small custom selection")
                 if viz_mode == '3d':
                     if embeddings_matrix.shape[1] >= 3:
@@ -453,8 +466,11 @@ def embeddings_visualization_data_api(request):
                         umap_embeddings = np.pad(embeddings_matrix[:, :1], ((0, 0), (0, 1)), mode='constant')
                 cluster_labels = np.zeros(len(embeddings_matrix), dtype=int)
             else:
+                n_components = 3 if viz_mode == '3d' else 2
+                if threading_layer == 'disabled':
+                    logger.info("Numba threading layer disabled; attempting projection with fallback mode")
+
                 try:
-                    n_components = 3 if viz_mode == '3d' else 2
                     n_samples = len(embeddings_matrix)
                     import math
                     adaptive_n_neighbors = min(max(5, int(math.sqrt(n_samples))), 50, n_samples - 1)
@@ -480,13 +496,30 @@ def embeddings_visualization_data_api(request):
                         logger.warning("Low UMAP embedding variance - may affect clustering quality")
                 except Exception as e:
                     logger.error(f"UMAP failed: {e}")
-                    if viz_mode == '3d':
-                        if embeddings_matrix.shape[1] >= 3:
-                            umap_embeddings = embeddings_matrix[:, :3]
+                    pca_fallback_used = False
+                    if threading_layer == 'disabled':
+                        try:
+                            target_components = min(n_components, embeddings_matrix.shape[1])
+                            if target_components >= 1:
+                                pca = PCA(n_components=target_components)
+                                umap_embeddings = pca.fit_transform(embeddings_matrix)
+                                if target_components < n_components:
+                                    umap_embeddings = np.pad(umap_embeddings, ((0, 0), (0, n_components - target_components)), mode='constant')
+                                pca_fallback_used = True
+                                logger.info("PCA fallback succeeded for projection")
+                        except Exception as pca_exc:
+                            logger.warning(f"PCA fallback failed: {pca_exc}")
+                    if not pca_fallback_used:
+                        if viz_mode == '3d':
+                            if embeddings_matrix.shape[1] >= 3:
+                                umap_embeddings = embeddings_matrix[:, :3]
+                            else:
+                                umap_embeddings = np.pad(embeddings_matrix[:, :2], ((0, 0), (0, 1)), mode='constant')
                         else:
-                            umap_embeddings = np.pad(embeddings_matrix[:, :2], ((0, 0), (0, 1)), mode='constant')
-                    else:
-                        umap_embeddings = embeddings_matrix[:, :2]
+                            if embeddings_matrix.shape[1] >= 2:
+                                umap_embeddings = embeddings_matrix[:, :2]
+                            else:
+                                umap_embeddings = np.pad(embeddings_matrix[:, :1], ((0, 0), (0, 1)), mode='constant')
 
                 if not manual_mode:
                     try:
@@ -761,7 +794,8 @@ def embeddings_visualization_data_api(request):
             'cluster_size': cluster_size,
             'epsilon': epsilon,
             'viz_mode': viz_mode,
-            'standard_ids': standard_ids
+            'standard_ids': standard_ids,
+            'refresh_cache': force_refresh
         }
         
         return view.success_response(visualization_data)
