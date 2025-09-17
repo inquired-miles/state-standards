@@ -47,6 +47,9 @@
                 <button class="btn btn-primary w-100 mt-3" id="new-cluster-btn">
                     <i class="fas fa-plus"></i> Create Cluster from Search
                 </button>
+                <button class="btn btn-outline-primary w-100 mt-2" id="import-proxy-btn">
+                    <i class="fas fa-download"></i> Import from Proxy Run
+                </button>
             </div>
 
             <div class="custom-cluster-layout">
@@ -168,6 +171,84 @@
         </div>
     </div>
 </div>
+
+<!-- Import From Proxy Modal -->
+<div class="modal fade" id="proxy-import-modal" tabindex="-1" aria-labelledby="proxy-import-label" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="proxy-import-label">Import from Proxy Runs</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row g-3 mb-2">
+                    <div class="col-md-3">
+                        <label class="form-label small mb-1">Run Type</label>
+                        <select class="form-select" id="import-run-type">
+                            <option value="">All</option>
+                            <option value="atoms">Atom Clustering</option>
+                            <option value="standards">Standard Clustering</option>
+                            <option value="topics">Topic Categorization</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-1">Grade Level</label>
+                        <select class="form-select" id="import-grade">
+                            <option value="">All Grades</option>
+                            {% for grade in grade_levels %}
+                            <option value="{{ grade.grade_numeric }}">{{ grade.grade }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-1">Subject Area</label>
+                        <select class="form-select" id="import-subject">
+                            <option value="">All Subjects</option>
+                            {% for subject in subject_areas %}
+                            <option value="{{ subject.id }}">{{ subject.name }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small mb-1">Search</label>
+                        <input type="text" class="form-control" id="import-search" placeholder="Filter runs by name or notes">
+                    </div>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-5">
+                        <div class="border rounded p-2" style="max-height: 360px; overflow-y: auto;">
+                            <div class="d-flex align-items-center justify-content-between mb-2">
+                                <strong>Runs</strong>
+                                <button class="btn btn-sm btn-outline-secondary" id="refresh-runs-btn">Refresh</button>
+                            </div>
+                            <div id="import-runs-list" class="list-group small">
+                                <div class="text-muted">Loading…</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-7">
+                        <div class="border rounded p-2" style="max-height: 360px; overflow-y: auto;">
+                            <div class="d-flex align-items-center justify-content-between mb-2">
+                                <strong>Proxies in Selected Run</strong>
+                                <span class="text-muted small" id="selected-proxies-count">0 selected</span>
+                            </div>
+                            <div id="import-proxies-list" class="list-group small">
+                                <div class="text-muted">Select a run to view proxies…</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" id="confirm-import-proxies">
+                    <i class="fas fa-download"></i> Import Selected Proxies
+                </button>
+            </div>
+        </div>
+    </div>
+    
+</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -207,6 +288,9 @@
             reportsEndpoint: '{% url "dashboard:cluster_reports_api" %}',
             reportDetailBase: '{% url "dashboard:cluster_report_detail_api" "00000000-0000-0000-0000-000000000000" %}'.replace('00000000-0000-0000-0000-000000000000', ''),
             semanticSearchEndpoint: '{% url "dashboard:embeddings_semantic_search" %}',
+            proxyRunsListEndpoint: '{% url "dashboard:proxy_runs_list_api" %}',
+            proxyRunProxiesEndpoint: '{% url "dashboard:proxy_run_proxies_api" %}',
+            importProxiesEndpoint: '{% url "dashboard:import_proxies_as_clusters_api" %}',
             csrfToken: '{{ csrf_token }}'
         });
     });

@@ -10,6 +10,7 @@ from .views import (
     
     # Proxy API views
     proxy_run_coverage_api, proxy_run_proxies_api, generate_proxies_api,
+    proxy_runs_list_api,
     proxy_job_status_api, generate_standard_proxies_api, standard_proxy_job_status_api,
     proxy_detail_api,
     
@@ -29,6 +30,7 @@ from .views import (
 
     # Custom cluster APIs
     custom_clusters_api, custom_cluster_detail_api,
+    import_proxies_as_clusters_api,
     cluster_reports_api, cluster_report_detail_api,
 )
 
@@ -51,6 +53,7 @@ urlpatterns = [
     path('api/analyze-coverage/', analyze_coverage_api, name='analyze_coverage_api'),
     path('api/proxy-run-coverage/', proxy_run_coverage_api, name='proxy_run_coverage_api'),
     path('api/proxy-run-proxies/', proxy_run_proxies_api, name='proxy_run_proxies_api'),
+    path('api/proxy-runs/', proxy_runs_list_api, name='proxy_runs_list_api'),
     
     # Atom-level proxy endpoints
     path('api/generate-proxies/', generate_proxies_api, name='generate_proxies_api'),
@@ -95,6 +98,7 @@ urlpatterns = [
     # Custom cluster APIs
     path('api/custom-clusters/', custom_clusters_api, name='custom_clusters_api'),
     path('api/custom-clusters/<uuid:cluster_id>/', custom_cluster_detail_api, name='custom_cluster_detail_api'),
+    path('api/custom-clusters/import-from-proxies/', import_proxies_as_clusters_api, name='import_proxies_as_clusters_api'),
     path('api/cluster-reports/', cluster_reports_api, name='cluster_reports_api'),
     path('api/cluster-reports/<uuid:report_id>/', cluster_report_detail_api, name='cluster_report_detail_api'),
 ]

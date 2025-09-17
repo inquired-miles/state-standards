@@ -26,7 +26,12 @@
         reportModalMode: 'create',
         editingReportId: null,
         selectionRequestId: 0,
-        activeReport: null
+        activeReport: null,
+        // Import-from-proxy state
+        importModal: null,
+        importFilters: { runType: '', grade: '', subject: '', q: '' },
+        importSelectedRunId: null,
+        importSelectedProxies: new Map()
     };
 
     function getCookie(name) {
@@ -51,6 +56,14 @@
         const baseWithoutTrailingSlash = normalizedBase.replace(/\/+$/, '');
         const normalizedAppend = String(append).replace(/^\/+/, '');
         return `${baseWithoutTrailingSlash}/${normalizedAppend}`;
+    }
+
+    function formatProxyTypeBadge(type) {
+        switch (type) {
+            case 'topics': return '<span class="badge bg-success">Topics</span>';
+            case 'standards': return '<span class="badge bg-secondary">Standards</span>';
+            default: return '<span class="badge bg-info text-dark">Atoms</span>';
+        }
     }
 
     function fetchJSON(url, options = {}) {
@@ -171,8 +184,10 @@
             const label = document.createElement('label');
             label.className = 'form-check-label d-flex justify-content-between align-items-center w-100';
             label.htmlFor = checkbox.id;
+            const copied = cluster.copied_from_proxy ? '<span class="badge bg-light text-dark border ms-2">Copied</span>' : '';
             label.innerHTML = `
                 <span class="fw-semibold">${cluster.name}</span>
+                ${copied}
                 <span class="text-muted small ms-2">${cluster.standards_count}</span>
             `;
 
@@ -239,6 +254,184 @@
 
         updateSelectionUI();
         syncClusterCheckboxes();
+    }
+
+    // --- Import from Proxy Runs ---
+    function openImportModal() {
+        const modalEl = document.getElementById('proxy-import-modal');
+        if (!modalEl || !window.bootstrap) {
+            console.warn('Import modal or Bootstrap not available');
+            return;
+        }
+        if (!state.importModal) {
+            state.importModal = new window.bootstrap.Modal(modalEl);
+        }
+        state.importSelectedRunId = null;
+        state.importSelectedProxies.clear();
+        const cnt = document.getElementById('selected-proxies-count');
+        if (cnt) cnt.textContent = '0 selected';
+        renderImportRuns([]);
+        renderImportProxies(null, []);
+        loadImportRuns();
+        state.importModal.show();
+    }
+
+    function getImportFilters() {
+        const runType = document.getElementById('import-run-type')?.value || '';
+        const grade = document.getElementById('import-grade')?.value || '';
+        const subject = document.getElementById('import-subject')?.value || '';
+        const q = document.getElementById('import-search')?.value || '';
+        state.importFilters = { runType, grade, subject, q };
+        return state.importFilters;
+    }
+
+    function loadImportRuns() {
+        const base = state.endpoints.proxyRunsListEndpoint;
+        if (!base) return;
+        const url = new URL(base, window.location.origin);
+        const { runType, grade, subject, q } = getImportFilters();
+        if (runType) url.searchParams.set('run_type', runType);
+        if (grade) url.searchParams.set('grades', grade);
+        if (subject) url.searchParams.set('subject_area_id', subject);
+        if (q) url.searchParams.set('q', q);
+        fetchJSON(url.toString())
+            .then(payload => renderImportRuns((payload && payload.data && payload.data.runs) || []))
+            .catch(() => renderImportRuns([]));
+    }
+
+    function renderImportRuns(runs) {
+        const list = document.getElementById('import-runs-list');
+        if (!list) return;
+        list.innerHTML = '';
+        if (!runs.length) {
+            list.innerHTML = '<div class="text-muted">No runs found.</div>';
+            return;
+        }
+        runs.forEach(run => {
+            const a = document.createElement('a');
+            a.href = '#';
+            a.className = 'list-group-item list-group-item-action';
+            a.dataset.runId = run.run_id;
+            a.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="fw-semibold">${run.name}</div>
+                        <div class="text-muted small">${run.filter_summary || ''}</div>
+                    </div>
+                    <span class="badge bg-light text-dark border">${run.run_type}</span>
+                </div>`;
+            a.addEventListener('click', (e) => {
+                e.preventDefault();
+                document.querySelectorAll('#import-runs-list .list-group-item').forEach(el => el.classList.remove('active'));
+                a.classList.add('active');
+                state.importSelectedRunId = run.run_id;
+                state.importSelectedProxies.clear();
+                const cnt = document.getElementById('selected-proxies-count');
+                if (cnt) cnt.textContent = '0 selected';
+                loadImportProxies(run.run_id);
+            });
+            list.appendChild(a);
+        });
+    }
+
+    function loadImportProxies(runId) {
+        const base = state.endpoints.proxyRunProxiesEndpoint;
+        if (!base) return;
+        const url = new URL(base, window.location.origin);
+        url.searchParams.set('run_id', runId);
+        const { grade, subject } = getImportFilters();
+        if (grade) url.searchParams.set('grades', grade);
+        if (subject) url.searchParams.set('subject_area_id', subject);
+        fetchJSON(url.toString())
+            .then(payload => renderImportProxies(runId, (payload && payload.data && payload.data.proxies) || []))
+            .catch(() => renderImportProxies(runId, []));
+    }
+
+    function toggleImportProxySelection(runId, proxy) {
+        const key = `${runId}::${proxy.proxy_id}`;
+        if (state.importSelectedProxies.has(key)) {
+            state.importSelectedProxies.delete(key);
+        } else {
+            state.importSelectedProxies.set(key, {
+                run_id: runId,
+                proxy_id: proxy.proxy_id,
+                proxy_type: proxy.proxy_type || 'atoms',
+                title: proxy.title || ''
+            });
+        }
+        const label = document.getElementById('selected-proxies-count');
+        if (label) label.textContent = `${state.importSelectedProxies.size} selected`;
+    }
+
+    function renderImportProxies(runId, proxies) {
+        const list = document.getElementById('import-proxies-list');
+        if (!list) return;
+        list.innerHTML = '';
+        if (!runId) {
+            list.innerHTML = '<div class="text-muted">Select a run to view proxies…</div>';
+            return;
+        }
+        if (!proxies.length) {
+            list.innerHTML = '<div class="text-muted">No proxies found for selected run.</div>';
+            return;
+        }
+        proxies.forEach(proxy => {
+            const label = document.createElement('label');
+            label.className = 'list-group-item d-flex align-items-center gap-2';
+            const cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.className = 'form-check-input me-2';
+            cb.addEventListener('change', () => toggleImportProxySelection(runId, proxy));
+            const content = document.createElement('div');
+            content.className = 'd-flex justify-content-between w-100 align-items-center';
+            content.innerHTML = `
+                <div>
+                    <div class="fw-semibold">${proxy.title || proxy.proxy_id}</div>
+                    <div class="text-muted small">${proxy.covered_count} standards • ${proxy.states_in_scope} states</div>
+                </div>
+                <div>${formatProxyTypeBadge(proxy.proxy_type)}</div>
+            `;
+            label.appendChild(cb);
+            label.appendChild(content);
+            list.appendChild(label);
+        });
+    }
+
+    function confirmImportSelectedProxies() {
+        if (!state.importSelectedProxies.size) {
+            alert('Select at least one proxy to import.');
+            return;
+        }
+        const url = state.endpoints.importProxiesEndpoint;
+        if (!url) {
+            console.error('Import endpoint not configured');
+            return;
+        }
+        const headers = {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRFToken': state.csrfToken || getCookie('csrftoken')
+        };
+        const imports = Array.from(state.importSelectedProxies.values());
+        fetchJSON(url, { method: 'POST', headers, body: JSON.stringify({ imports }) })
+            .then(payload => {
+                const created = (payload && payload.data && payload.data.created) || [];
+                if (created.length) {
+                    created.forEach(cluster => {
+                        state.clusterSummaries.set(cluster.id, cluster);
+                        state.clusterDetails.set(cluster.id, cluster);
+                    });
+                    loadClusterList();
+                    state.importSelectedProxies.clear();
+                    const cnt = document.getElementById('selected-proxies-count');
+                    if (cnt) cnt.textContent = '0 selected';
+                    if (state.importModal) state.importModal.hide();
+                }
+            })
+            .catch(err => {
+                console.error('Import failed', err);
+                alert(err && err.message ? err.message : 'Import failed');
+            });
     }
 
     function renderClusterDetail(cluster) {
@@ -1189,6 +1382,30 @@
             const trigger = document.getElementById('new-cluster-btn');
             if (trigger) {
                 trigger.addEventListener('click', () => openClusterModal({ mode: 'create' }));
+            }
+
+            const importBtn = document.getElementById('import-proxy-btn');
+            if (importBtn) {
+                importBtn.addEventListener('click', () => openImportModal());
+            }
+            const refreshRunsBtn = document.getElementById('refresh-runs-btn');
+            if (refreshRunsBtn) {
+                refreshRunsBtn.addEventListener('click', () => loadImportRuns());
+            }
+            ['import-run-type','import-grade','import-subject'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.addEventListener('change', () => {
+                    loadImportRuns();
+                    if (state.importSelectedRunId) loadImportProxies(state.importSelectedRunId);
+                });
+            });
+            const importSearch = document.getElementById('import-search');
+            if (importSearch) {
+                importSearch.addEventListener('keyup', () => loadImportRuns());
+            }
+            const confirmImport = document.getElementById('confirm-import-proxies');
+            if (confirmImport) {
+                confirmImport.addEventListener('click', () => confirmImportSelectedProxies());
             }
 
             const newReportButton = document.getElementById('new-report-btn');

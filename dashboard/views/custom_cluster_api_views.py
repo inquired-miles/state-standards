@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError, PermissionDenied
 from django.db.models import Q
 
 from standards.models import TopicCluster, ClusterReport
+from standards.models import ProxyRun, ProxyStandard, TopicBasedProxy
 from standards.services.discovery import CustomClusterService
 from .base import BaseAPIView, api_endpoint
 
@@ -50,6 +51,13 @@ class CustomClusterAPIView(BaseAPIView):
             'updated_at': cluster.updated_at,
             'search_context': cluster.search_context or {},
             'can_edit': can_edit,
+            'copied_from_proxy': cluster.is_imported_from_proxy if hasattr(cluster, 'is_imported_from_proxy') else False,
+            'source': {
+                'run_id': cluster.source_run.run_id if getattr(cluster, 'source_run', None) else None,
+                'proxy_id': cluster.source_proxy_id or None,
+                'proxy_type': cluster.source_proxy_type or None,
+                'title': cluster.source_title or None,
+            }
         }
         if include_members:
             members = []
@@ -203,6 +211,94 @@ def custom_cluster_detail_api(request, cluster_id: str):
 
     except TopicCluster.DoesNotExist:
         return view.error_response('Cluster not found', status=404)
+    except Exception as e:
+        return view.handle_exception(request, e)
+
+
+@api_endpoint(['POST'])
+def import_proxies_as_clusters_api(request):
+    """Import one or more proxies as editable custom clusters.
+
+    Payload:
+    {
+      "imports": [
+        {"run_id": "...", "proxy_type": "topics|atoms|standards", "proxy_id": "...", "title": "...", "description": "...", "is_shared": false}
+      ]
+    }
+    """
+    view = CustomClusterAPIView()
+    user = request.user
+    try:
+        body = view.parse_json_body(request)
+        items = body.get('imports') or []
+        if not isinstance(items, list) or not items:
+            return view.validation_error_response('imports must be a non-empty list')
+
+        created = []
+        for item in items:
+            run_id = view.validate_string(item.get('run_id'), min_length=1, max_length=100, field_name='run_id')
+            proxy_id = view.validate_string(item.get('proxy_id'), min_length=1, max_length=200, field_name='proxy_id')
+            proxy_type = (item.get('proxy_type') or '').strip() or 'atoms'
+            title_override = (item.get('title') or '').strip()
+            desc_override = (item.get('description') or '').strip()
+            is_shared = bool(item.get('is_shared', False))
+
+            try:
+                run = ProxyRun.objects.get(run_id=run_id)
+            except ProxyRun.DoesNotExist:
+                return view.error_response(f'Run not found: {run_id}', status=404)
+
+            # Resolve proxy and collect standard IDs
+            standard_ids = []
+            source_title = None
+            if proxy_type == 'topics' or run.run_type == 'topics':
+                try:
+                    tproxy = TopicBasedProxy.objects.get(proxy_id=proxy_id)
+                except TopicBasedProxy.DoesNotExist:
+                    return view.error_response(f'Topic-based proxy not found: {proxy_id}', status=404)
+                source_title = tproxy.title or proxy_id
+                standard_ids = list(tproxy.member_standards.values_list('id', flat=True))
+                resolved_type = 'topics'
+            else:
+                try:
+                    ps = ProxyStandard.objects.get(proxy_id=proxy_id)
+                except ProxyStandard.DoesNotExist:
+                    return view.error_response(f'Proxy standard not found: {proxy_id}', status=404)
+                source_title = ps.title or proxy_id
+                if proxy_type == 'standards' or ps.source_type == 'standards':
+                    standard_ids = list(ps.member_standards.values_list('id', flat=True))
+                    resolved_type = 'standards'
+                else:
+                    # atoms -> map member atoms to standards
+                    standard_ids = list(ps.member_atoms.values_list('standard_id', flat=True))
+                    resolved_type = 'atoms'
+
+            if not standard_ids:
+                return view.validation_error_response(f'Proxy {proxy_id} has no member standards to import')
+
+            cluster_title = title_override or f"{source_title or proxy_id}"
+            description = desc_override or f"Imported from proxy run {run.run_id}"
+
+            # Create the cluster via service and then record source metadata
+            cluster = view.service.create_custom_cluster(
+                owner=user,
+                title=cluster_title,
+                standard_ids=standard_ids,
+                description=description,
+                is_shared=is_shared,
+                search_context={'imported_from_proxy': True, 'run_id': run.run_id, 'proxy_id': proxy_id, 'proxy_type': resolved_type},
+            )
+            cluster.source_run = run
+            cluster.source_proxy_id = proxy_id
+            cluster.source_proxy_type = resolved_type
+            cluster.source_title = source_title or ''
+            cluster.save(update_fields=['source_run', 'source_proxy_id', 'source_proxy_type', 'source_title'])
+
+            created.append(view.serialize_cluster(cluster, include_members=True, current_user=user))
+
+        return view.success_response({'created': created}, status=201)
+    except ValidationError as e:
+        return view.validation_error_response(str(e))
     except Exception as e:
         return view.handle_exception(request, e)
 
