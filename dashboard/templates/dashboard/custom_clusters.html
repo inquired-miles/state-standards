@@ -136,12 +136,7 @@
                     <label class="form-label" for="cluster-description-input">Description</label>
                     <textarea class="form-control" id="cluster-description-input" rows="2" placeholder="Optional notes about this cluster"></textarea>
                 </div>
-                <div class="mb-3">
-                    <div class="alert alert-info small">
-                        Use semantic search to find relevant standards. Select the standards you want to include, then click <strong>Save Cluster</strong> when ready.
-                    </div>
-                </div>
-                {% include 'dashboard/partials/semantic_search.html' with title='Search Standards to Add' enable_selection=True mode='select' %}
+                {% include 'dashboard/partials/semantic_search.html' with title='Search Standards to Add' enable_selection=True mode='select' enable_filters=True %}
             </div>
         </div>
     </div>

@@ -150,6 +150,7 @@ def custom_clusters_dashboard(request):
         'subtitle': 'Curate semantic groups of standards and compare coverage across states',
         'subject_areas': SubjectArea.objects.all(),
         'grade_levels': GradeLevel.objects.all().order_by('grade_numeric'),
+        'states': State.objects.all().order_by('name'),
     }
     return render(request, 'dashboard/custom_clusters.html', context)
 

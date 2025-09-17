@@ -128,6 +128,9 @@
             const selectedCount = root.querySelector('[data-selection-count]');
             const clearButton = root.querySelector('[data-clear-selection]');
             const confirmButton = root.querySelector('[data-confirm-selection]');
+            const subjectFilter = root.querySelector('[data-filter-subject]');
+            const gradeFilter = root.querySelector('[data-filter-grade]');
+            const stateFilter = root.querySelector('[data-filter-state]');
 
             const mode = (root.dataset.mode || 'view');
             const selected = new Map();
@@ -137,9 +140,20 @@
             const csrfToken = options.csrfToken || getCookie('csrftoken');
 
             function collectFilters() {
-                let filters = {};
+                const filters = {};
+
+                if (subjectFilter && subjectFilter.value) {
+                    filters.subject_area = subjectFilter.value;
+                }
+                if (gradeFilter && gradeFilter.value) {
+                    filters.grade_level = gradeFilter.value;
+                }
+                if (stateFilter && stateFilter.value) {
+                    filters.state = stateFilter.value;
+                }
+
                 if (typeof options.getFilters === 'function') {
-                    filters = Object.assign({}, options.getFilters());
+                    Object.assign(filters, options.getFilters());
                 }
                 return filters;
             }
@@ -239,7 +253,7 @@
                 renderStateEmphasis(stateContainer, data, filterByState);
             }
 
-    async function performSearch() {
+            async function performSearch() {
                 const query = queryInput.value.trim();
                 if (!query) return;
 
@@ -260,12 +274,12 @@
                         body: JSON.stringify(payload)
                     });
                     const json = await response.json();
-                if (!response.ok) {
-                    throw new Error(json.error || 'Search failed');
-                }
-                const data = json.data || json;
-                renderResults(data.results || [], data.state_emphasis || {});
-                showStateEmphasis(data.state_emphasis || {});
+                    if (!response.ok) {
+                        throw new Error(json.error || 'Search failed');
+                    }
+                    const data = json.data || json;
+                    renderResults(data.results || [], data.state_emphasis || {});
+                    showStateEmphasis(data.state_emphasis || {});
                     if (typeof options.onSearchComplete === 'function') {
                         options.onSearchComplete(data, payload);
                     }
@@ -302,11 +316,34 @@
                 }
             });
 
+            const filterElements = [subjectFilter, gradeFilter, stateFilter].filter(Boolean);
+            if (filterElements.length) {
+                const handleFilterChange = () => {
+                    if (queryInput.value.trim()) {
+                        performSearch();
+                    }
+                };
+                filterElements.forEach(element => {
+                    element.addEventListener('change', handleFilterChange);
+                });
+            }
+
             return {
                 search: performSearch,
                 clearSelection,
                 getSelected: () => Array.from(selected.values()),
-                setSelection
+                setSelection,
+                setFilters(filterValues = {}) {
+                    if (subjectFilter) {
+                        subjectFilter.value = filterValues.subject_area || '';
+                    }
+                    if (gradeFilter) {
+                        gradeFilter.value = filterValues.grade_level || '';
+                    }
+                    if (stateFilter) {
+                        stateFilter.value = filterValues.state || '';
+                    }
+                }
             };
         }
     };

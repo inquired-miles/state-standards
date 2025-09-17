@@ -33,11 +33,18 @@
     }
 
     function buildEndpoint(base, append = '') {
-        if (!base) return '';
-        const normalizedBase = String(base).replace(/\/+$/, '');
-        if (!append) return normalizedBase;
+        if (!base) {
+            return '';
+        }
+
+        const normalizedBase = String(base).trim();
+        if (!append) {
+            return normalizedBase;
+        }
+
+        const baseWithoutTrailingSlash = normalizedBase.replace(/\/+$/, '');
         const normalizedAppend = String(append).replace(/^\/+/, '');
-        return `${normalizedBase}/${normalizedAppend}`;
+        return `${baseWithoutTrailingSlash}/${normalizedAppend}`;
     }
 
     function fetchJSON(url, options = {}) {
@@ -68,6 +75,61 @@
                 throw error;
             }
             return data;
+        });
+    }
+
+    function removeClusterFromState(clusterId) {
+        if (!clusterId) {
+            return;
+        }
+
+        state.clusterDetails.delete(clusterId);
+        state.clusterSummaries.delete(clusterId);
+        state.selectedClusters.delete(clusterId);
+
+        const selectedArray = getSelectedClustersArray();
+
+        if (state.activeClusterId === clusterId) {
+            state.activeClusterId = selectedArray.length ? selectedArray[0].id : null;
+        }
+        if (selectedArray.length === 0) {
+            renderClusterDetail(null);
+        } else if (selectedArray.length === 1) {
+            renderClusterDetail(selectedArray[0]);
+        } else {
+            renderMultiClusterSummary(selectedArray);
+        }
+
+        updateSelectionUI();
+        refreshVisualizationForSelection();
+    }
+
+    function performClusterDeletion(clusterId) {
+        if (!clusterId) {
+            return Promise.resolve();
+        }
+
+        const url = buildEndpoint(state.endpoints.clusterDetailBase, `${clusterId}/`);
+        if (!url) {
+            console.error('Cluster detail endpoint not configured');
+            return Promise.reject(new Error('Cluster endpoint not configured'));
+        }
+
+        const headers = {
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRFToken': state.csrfToken || getCookie('csrftoken')
+        };
+
+        return fetchJSON(url, {
+            method: 'DELETE',
+            headers
+        }).then(payload => {
+            removeClusterFromState(clusterId);
+            loadClusterList();
+            return payload;
+        }).catch(err => {
+            console.error('Failed to delete cluster', err);
+            throw err;
         });
     }
 
@@ -662,6 +724,9 @@
                 state.searchInstance.setSelection(preselected);
             }
             state.lastSearchPayload = cluster.search_context || {};
+            if (state.searchInstance && typeof state.searchInstance.setFilters === 'function') {
+                state.searchInstance.setFilters(state.lastSearchPayload || {});
+            }
         } else {
             if (titleInput) titleInput.value = '';
             if (descriptionInput) descriptionInput.value = '';
@@ -672,6 +737,9 @@
                 }
                 if (typeof state.searchInstance.setSelection === 'function') {
                     state.searchInstance.setSelection([]);
+                }
+                if (typeof state.searchInstance.setFilters === 'function') {
+                    state.searchInstance.setFilters();
                 }
             }
         }
@@ -739,6 +807,9 @@
         },
         openModal(options) {
             openClusterModal(options);
+        },
+        deleteCluster(clusterId) {
+            return performClusterDeletion(clusterId);
         }
     };
 })();
@@ -774,9 +845,12 @@ function handleVisualizationPanel(cluster) {
     }
 
     const editButtonMarkup = cluster.can_edit ? `
-        <div class="d-flex justify-content-end mb-3">
+        <div class="d-flex justify-content-end gap-2 mb-3">
             <button type="button" class="btn btn-sm btn-outline-primary" data-edit-cluster="${cluster.id}">
                 <i class="fas fa-edit"></i> Edit Cluster
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-danger" data-delete-cluster="${cluster.id}">
+                <i class="fas fa-trash-alt"></i> Delete Cluster
             </button>
         </div>
     ` : '';
@@ -796,6 +870,32 @@ function handleVisualizationPanel(cluster) {
                 event.preventDefault();
                 if (window.dashboardCustomClusters && typeof window.dashboardCustomClusters.openModal === 'function') {
                     window.dashboardCustomClusters.openModal({ mode: 'edit', cluster });
+                }
+            });
+        }
+
+        const deleteButton = summaryEl.querySelector('[data-delete-cluster]');
+        if (deleteButton) {
+            deleteButton.addEventListener('click', event => {
+                event.preventDefault();
+                const confirmed = window.confirm('Delete this custom cluster? This action cannot be undone.');
+                if (!confirmed) {
+                    return;
+                }
+
+                const target = event.currentTarget;
+                const originalHtml = target.innerHTML;
+                target.disabled = true;
+                target.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Deleting...';
+
+                if (window.dashboardCustomClusters && typeof window.dashboardCustomClusters.deleteCluster === 'function') {
+                    window.dashboardCustomClusters.deleteCluster(cluster.id)
+                        .catch(err => {
+                            target.disabled = false;
+                            target.innerHTML = originalHtml;
+                            const message = (err && err.message) ? err.message : 'Unable to delete cluster.';
+                            window.alert(message);
+                        });
                 }
             });
         }

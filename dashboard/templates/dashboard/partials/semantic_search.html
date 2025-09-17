@@ -18,6 +18,51 @@
         </div>
     </div>
 
+    {% if enable_filters %}
+    <div class="row g-3 mb-3" data-search-filters>
+        <div class="col-md-4">
+            <label class="form-label small mb-1">Subject Area</label>
+            <select class="form-select form-select-sm" data-filter-subject>
+                <option value="">All Subjects</option>
+                {% for subject in subject_areas %}
+                <option value="{{ subject.id }}">{{ subject.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label small mb-1">Grade Level</label>
+            <select class="form-select form-select-sm" data-filter-grade>
+                <option value="">All Grades</option>
+                {% for grade in grade_levels %}
+                <option value="{{ grade.grade_numeric }}">{{ grade.grade }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label small mb-1">State</label>
+            <select class="form-select form-select-sm" data-filter-state>
+                <option value="">All States</option>
+                {% for state in states %}
+                <option value="{{ state.code }}">{{ state.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if enable_selection %}
+    <div class="mt-3" data-selection-panel>
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+            <h6 class="mb-0">Selected Standards (<span data-selection-count>0</span>)</h6>
+            <div class="d-flex gap-2">
+                <button type="button" class="btn btn-outline-secondary" data-clear-selection>Clear Selection</button>
+                <button type="button" class="btn btn-primary" data-confirm-selection>Save Cluster</button>
+            </div>
+        </div>
+        <div class="selected-results small" data-selected-list></div>
+    </div>
+    {% endif %}
+
     <div class="d-none text-center" data-search-loading>
         <div class="spinner-border text-primary" role="status"></div>
         <p class="mt-2">Searching...</p>
@@ -35,15 +80,4 @@
             </div>
         </div>
     </div>
-
-    {% if enable_selection %}
-    <div class="mt-3" data-selection-panel>
-        <h6>Selected Standards (<span data-selection-count>0</span>)</h6>
-        <div class="selected-results small" data-selected-list></div>
-        <div class="d-flex justify-content-end gap-2 mt-3">
-            <button type="button" class="btn btn-outline-secondary" data-clear-selection>Clear Selection</button>
-            <button type="button" class="btn btn-primary" data-confirm-selection>Save Cluster</button>
-        </div>
-    </div>
-    {% endif %}
 </div>
