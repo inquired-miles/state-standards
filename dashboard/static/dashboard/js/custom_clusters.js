@@ -14,13 +14,19 @@
         clusterDetails: new Map(),
         selectedClusters: new Map(),
         activeClusterId: null,
+        activeReportId: null,
         activeFilters: {
             gradeLevel: '',
             subjectArea: ''
         },
         vizMode: '2d',
         modalMode: 'create',
-        editingClusterId: null
+        editingClusterId: null,
+        reportModal: null,
+        reportModalMode: 'create',
+        editingReportId: null,
+        selectionRequestId: 0,
+        activeReport: null
     };
 
     function getCookie(name) {
@@ -150,14 +156,14 @@
             state.clusterSummaries.set(cluster.id, cluster);
 
             const listItem = document.createElement('div');
-            listItem.className = 'list-group-item list-group-item-action d-flex align-items-center justify-content-between';
+            listItem.className = 'list-group-item list-group-item-action d-flex align-items-center justify-content-between gap-2';
 
-            const formCheck = document.createElement('div');
-            formCheck.className = 'form-check flex-grow-1';
+            const leftWrap = document.createElement('div');
+            leftWrap.className = 'd-flex align-items-center flex-grow-1 gap-2';
 
             const checkbox = document.createElement('input');
             checkbox.type = 'checkbox';
-            checkbox.className = 'form-check-input position-static me-2';
+            checkbox.className = 'form-check-input position-static';
             checkbox.id = `cluster-select-${cluster.id}`;
             checkbox.dataset.clusterId = cluster.id;
             checkbox.checked = state.selectedClusters.has(cluster.id);
@@ -170,34 +176,55 @@
                 <span class="text-muted small ms-2">${cluster.standards_count}</span>
             `;
 
-            formCheck.appendChild(checkbox);
-            formCheck.appendChild(label);
+            leftWrap.appendChild(checkbox);
+            leftWrap.appendChild(label);
 
-            const viewButton = document.createElement('button');
-            viewButton.type = 'button';
-            viewButton.className = 'btn btn-sm btn-outline-secondary ms-2';
-            viewButton.textContent = 'View';
-            viewButton.addEventListener('click', event => {
+            const actions = document.createElement('div');
+            actions.className = 'btn-group btn-group-sm';
+
+            const editButton = document.createElement('button');
+            editButton.type = 'button';
+            editButton.className = 'btn btn-outline-primary';
+            editButton.textContent = 'Edit';
+            editButton.addEventListener('click', event => {
                 event.preventDefault();
-                if (!checkbox.checked) {
-                    checkbox.checked = true;
-                }
-                handleClusterSelection(cluster.id, true).then(() => {
-                    focusOnCluster(cluster.id);
+                event.stopPropagation();
+                ensureClusterDetail(cluster.id).then(detail => {
+                    if (detail && window.dashboardCustomClusters && typeof window.dashboardCustomClusters.openModal === 'function') {
+                        window.dashboardCustomClusters.openModal({ mode: 'edit', cluster: detail });
+                    }
                 });
             });
+
+            const deleteButton = document.createElement('button');
+            deleteButton.type = 'button';
+            deleteButton.className = 'btn btn-outline-danger';
+            deleteButton.textContent = 'Delete';
+            deleteButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                const confirmed = window.confirm('Delete this custom cluster? This action cannot be undone.');
+                if (!confirmed) {
+                    return;
+                }
+                if (window.dashboardCustomClusters && typeof window.dashboardCustomClusters.deleteCluster === 'function') {
+                    window.dashboardCustomClusters.deleteCluster(cluster.id)
+                        .catch(err => {
+                            const message = (err && err.message) ? err.message : 'Unable to delete cluster.';
+                            window.alert(message);
+                        });
+                }
+            });
+
+            actions.appendChild(editButton);
+            actions.appendChild(deleteButton);
 
             checkbox.addEventListener('change', event => {
                 handleClusterSelection(cluster.id, event.target.checked);
             });
 
             listItem.addEventListener('click', event => {
-                if (
-                    event.target === checkbox ||
-                    event.target === viewButton ||
-                    (event.target.closest && event.target.closest('button') === viewButton) ||
-                    (event.target.closest && event.target.closest('.form-check'))
-                ) {
+                if (event.target === checkbox || event.target.closest('.btn-group')) {
                     return;
                 }
                 event.preventDefault();
@@ -205,35 +232,33 @@
                 handleClusterSelection(cluster.id, checkbox.checked);
             });
 
-            listItem.appendChild(formCheck);
-            listItem.appendChild(viewButton);
+            listItem.appendChild(leftWrap);
+            listItem.appendChild(actions);
             container.appendChild(listItem);
         });
 
         updateSelectionUI();
+        syncClusterCheckboxes();
     }
 
     function renderClusterDetail(cluster) {
-        if (!cluster) {
-            const title = document.getElementById('cluster-detail-title');
-            const placeholder = document.getElementById('cluster-placeholder');
-            const summaryEl = document.getElementById('cluster-summary');
-            const vizContainer = document.getElementById('cluster-visualizations');
-            if (title) title.textContent = 'Select a cluster to begin';
-            if (placeholder) {
-                placeholder.classList.remove('d-none');
-                placeholder.textContent = 'Choose one or more clusters from the list to explore their coverage and relationships.';
-            }
-            if (summaryEl) {
-                summaryEl.classList.add('d-none');
-                summaryEl.innerHTML = '';
-            }
-            if (vizContainer) {
-                vizContainer.classList.add('d-none');
-            }
+        const placeholder = document.getElementById('cluster-placeholder');
+        const vizContainer = document.getElementById('cluster-visualizations');
+
+        if (!placeholder || !vizContainer) {
             return;
         }
-        handleVisualizationPanel(cluster);
+
+        if (!cluster) {
+            placeholder.classList.remove('d-none');
+            placeholder.textContent = 'Choose one or more clusters from the list to explore their coverage and relationships.';
+            vizContainer.classList.add('d-none');
+            return;
+        }
+
+        placeholder.classList.add('d-none');
+        vizContainer.classList.remove('d-none');
+        handleVisualizationPanel();
     }
 
     function renderReportList(payload) {
@@ -242,38 +267,182 @@
         container.innerHTML = '';
         const reports = (payload && payload.data && payload.data.reports) || [];
         if (!reports.length) {
-            container.innerHTML = '<div class="text-muted small">No reports yet.</div>';
+            container.innerHTML = '<div class="text-muted small">No coverage reports yet.</div>';
+            state.activeReportId = null;
+            state.activeReport = null;
+            updateReportSummary(null);
+            setSelectedClustersFromIds([]);
             return;
         }
         reports.forEach(report => {
-            const item = document.createElement('button');
-            item.type = 'button';
-            item.className = 'list-group-item list-group-item-action';
-            item.textContent = `${report.title}`;
-            item.addEventListener('click', () => loadReportDetail(report.id));
-            container.appendChild(item);
+            const listItem = document.createElement('div');
+            listItem.className = 'list-group-item list-group-item-action d-flex align-items-center justify-content-between gap-2';
+            listItem.dataset.reportId = report.id;
+            if (state.activeReportId === report.id) {
+                listItem.classList.add('active');
+            }
+
+            const leftWrap = document.createElement('div');
+            leftWrap.className = 'flex-grow-1';
+            leftWrap.innerHTML = `
+                <div class="fw-semibold">${report.title}</div>
+                ${report.description ? `<div class="text-muted small">${report.description}</div>` : ''}
+            `;
+
+            const actions = document.createElement('div');
+            actions.className = 'btn-group btn-group-sm';
+
+            const editButton = document.createElement('button');
+            editButton.type = 'button';
+            editButton.className = 'btn btn-outline-primary';
+            editButton.textContent = 'Edit';
+            editButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                openCoverageReportModal({ mode: 'edit', report });
+            });
+
+            const deleteButton = document.createElement('button');
+            deleteButton.type = 'button';
+            deleteButton.className = 'btn btn-outline-danger';
+            deleteButton.textContent = 'Delete';
+            deleteButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                handleDeleteReport(report.id);
+            });
+
+            actions.appendChild(editButton);
+            actions.appendChild(deleteButton);
+
+            listItem.addEventListener('click', event => {
+                if (event.target.closest('.btn-group')) {
+                    return;
+                }
+                state.activeReportId = report.id;
+                container.querySelectorAll('.list-group-item').forEach(btn => btn.classList.remove('active'));
+                listItem.classList.add('active');
+                loadReportDetail(report.id);
+            });
+
+            listItem.appendChild(leftWrap);
+            listItem.appendChild(actions);
+            container.appendChild(listItem);
+        });
+
+        const activeReportStillExists = reports.some(report => report.id === state.activeReportId);
+        if (!activeReportStillExists) {
+            state.activeReportId = reports[0].id;
+        }
+
+        if (state.activeReportId) {
+            const activeButton = container.querySelector(`[data-report-id="${state.activeReportId}"]`);
+            if (activeButton) {
+                activeButton.classList.add('active');
+            }
+            loadReportDetail(state.activeReportId);
+        }
+    }
+
+    function updateReportSummary(report) {
+        const summaryCard = document.getElementById('report-summary');
+        const titleEl = document.getElementById('report-summary-title');
+        const descriptionEl = document.getElementById('report-summary-description');
+        const saveButton = document.getElementById('save-report-changes-btn');
+
+        if (!summaryCard || !titleEl || !descriptionEl) {
+            return;
+        }
+
+        if (!report) {
+            summaryCard.hidden = true;
+            titleEl.textContent = '';
+            descriptionEl.textContent = '';
+            descriptionEl.hidden = true;
+            if (saveButton) saveButton.hidden = true;
+            return;
+        }
+
+        summaryCard.hidden = false;
+        titleEl.textContent = report.title || 'Coverage Report';
+        if (report.description) {
+            descriptionEl.hidden = false;
+            descriptionEl.textContent = report.description;
+        } else {
+            descriptionEl.hidden = true;
+            descriptionEl.textContent = '';
+        }
+
+        if (saveButton) saveButton.hidden = false;
+    }
+
+    function applyReportData(payload) {
+        const report = payload && (payload.data || payload);
+        if (!report) {
+            updateReportSummary(null);
+            return;
+        }
+
+        state.activeReport = report;
+        const reportId = report.id || report.report_id || state.activeReportId;
+        if (reportId) {
+            state.activeReportId = reportId;
+        }
+
+        updateReportSummary(report);
+
+        const entries = report.clusters || [];
+        const clusterIds = entries.map(entry => entry.cluster_id).filter(Boolean);
+
+        setSelectedClustersFromIds(clusterIds).catch(err => {
+            console.error('Failed to apply coverage report selection', err);
         });
     }
 
-    function renderReportDetail(payload) {
-        const wrapper = document.getElementById('report-detail');
-        const title = document.getElementById('report-detail-title');
-        const body = document.getElementById('report-detail-body');
-        if (!wrapper || !title || !body) return;
-        const report = payload && payload.data;
-        if (!report) {
-            wrapper.hidden = false;
-            title.textContent = 'Report not found';
-            body.innerHTML = '<div class="text-danger">Unable to load report details.</div>';
-            return;
+    function setSelectedClustersFromIds(clusterIds) {
+        const uniqueIds = Array.from(new Set(clusterIds.filter(Boolean)));
+
+        const currentRequestId = ++state.selectionRequestId;
+
+        if (!uniqueIds.length) {
+            state.selectedClusters.clear();
+            state.activeClusterId = null;
+            updateSelectionUI();
+            renderClusterDetail(null);
+            refreshVisualizationForSelection();
+            syncClusterCheckboxes();
+            return Promise.resolve([]);
         }
-        wrapper.hidden = false;
-        title.textContent = report.title;
-        const rows = (report.clusters || []).map(entry => {
-            const summary = JSON.stringify(entry.summary || {}, null, 2);
-            return `<div class="mb-3"><h6>${entry.cluster_name}</h6><pre class="bg-light p-2 rounded">${summary}</pre></div>`;
-        }).join('');
-        body.innerHTML = rows || '<div class="text-muted">No clusters have been added to this report yet.</div>';
+
+        const detailPromises = uniqueIds.map(id => ensureClusterDetail(id));
+        return Promise.all(detailPromises).then(clusters => {
+            if (currentRequestId !== state.selectionRequestId) {
+                return [];
+            }
+            state.selectedClusters.clear();
+            clusters.forEach(cluster => {
+                if (cluster && cluster.id) {
+                    state.selectedClusters.set(cluster.id, cluster);
+                }
+            });
+
+            const selectedArray = getSelectedClustersArray();
+            if (selectedArray.length === 1) {
+                state.activeClusterId = selectedArray[0].id;
+                renderClusterDetail(selectedArray[0]);
+            } else if (selectedArray.length > 1) {
+                state.activeClusterId = selectedArray[0]?.id || null;
+                renderMultiClusterSummary(selectedArray);
+            } else {
+                state.activeClusterId = null;
+                renderClusterDetail(null);
+            }
+
+            updateSelectionUI();
+            refreshVisualizationForSelection();
+            syncClusterCheckboxes();
+            return selectedArray;
+        });
     }
 
     function loadClusterList() {
@@ -324,7 +493,7 @@
             return;
         }
         fetchJSON(url)
-            .then(renderReportDetail)
+            .then(applyReportData)
             .catch(err => console.error(err));
     }
 
@@ -356,15 +525,16 @@
     }
 
     function updateSelectionUI() {
-        const counter = document.getElementById('selected-count');
-        const compareBtn = document.getElementById('compare-selected-btn');
-        const count = state.selectedClusters.size;
-        if (counter) {
-            counter.textContent = String(count);
-        }
-        if (compareBtn) {
-            compareBtn.disabled = count === 0;
-        }
+        // Selection count no longer displayed; keep hook for potential future use.
+    }
+
+    function syncClusterCheckboxes() {
+        const checkboxes = document.querySelectorAll('#cluster-list input[type="checkbox"][data-cluster-id]');
+        const selectedIds = new Set(state.selectedClusters.keys());
+        checkboxes.forEach(cb => {
+            const clusterId = cb.dataset.clusterId;
+            cb.checked = selectedIds.has(clusterId);
+        });
     }
 
     function updateVizModeButtons() {
@@ -497,34 +667,29 @@
     }
 
     function renderMultiClusterSummary(selectedClusters) {
-        const title = document.getElementById('cluster-detail-title');
-        const summaryEl = document.getElementById('cluster-summary');
         const placeholder = document.getElementById('cluster-placeholder');
 
-        if (!title || !summaryEl) {
+        const count = selectedClusters.length;
+        if (!placeholder) {
             return;
         }
 
-        const count = selectedClusters.length;
-        title.textContent = count === 2 ? 'Comparing 2 Clusters' : `Comparing ${count} Clusters`;
-
-        if (placeholder) {
-            placeholder.classList.add('d-none');
+        const vizContainer = document.getElementById('cluster-visualizations');
+        if (vizContainer) {
+            vizContainer.classList.remove('d-none');
         }
 
-        summaryEl.classList.remove('d-none');
-
-        const clusterChips = selectedClusters.map(cluster => {
+        const clusterItems = selectedClusters.map(cluster => {
             return `<li class="list-group-item px-2 py-1 d-flex justify-content-between">
                 <span class="fw-semibold">${cluster.name}</span>
                 <span class="text-muted small">${cluster.standards_count} standards</span>
             </li>`;
         }).join('');
 
-        summaryEl.innerHTML = `
-            <p class="text-muted">${count} clusters selected. Visualizations reflect the combined standards set.</p>
-            <h6 class="mt-3">Included Clusters</h6>
-            <ul class="list-group list-group-flush mb-3">${clusterChips}</ul>
+        placeholder.classList.remove('d-none');
+        placeholder.innerHTML = `
+            <p class="text-muted mb-2">${count} clusters selected. Visualizations reflect the combined standards set.</p>
+            <ul class="list-group list-group-flush mb-0">${clusterItems}</ul>
         `;
     }
 
@@ -588,6 +753,7 @@
 
         updateSelectionUI();
         refreshVisualizationForSelection();
+        syncClusterCheckboxes();
         return Promise.resolve(null);
     }
 
@@ -747,6 +913,247 @@
         state.modal.show();
     }
 
+    function openCoverageReportModal({ mode = 'create', report = null } = {}) {
+        const modalEl = document.getElementById('report-builder-modal');
+        if (!modalEl || !window.bootstrap) {
+            console.warn('Report builder modal or Bootstrap not available');
+            return;
+        }
+
+        if (!state.reportModal) {
+            state.reportModal = new window.bootstrap.Modal(modalEl);
+        }
+
+        state.reportModalMode = mode;
+        state.editingReportId = report && report.id ? report.id : null;
+
+        const modalTitle = modalEl.querySelector('#report-builder-label');
+        const saveButton = modalEl.querySelector('#save-report-btn');
+        if (modalTitle) {
+            modalTitle.textContent = mode === 'edit' ? 'Edit Coverage Report' : 'New Coverage Report';
+        }
+        if (saveButton) {
+            saveButton.innerHTML = mode === 'edit'
+                ? '<i class="fas fa-save"></i> Save Changes'
+                : '<i class="fas fa-save"></i> Save Coverage Report';
+            saveButton.disabled = false;
+        }
+
+        const titleInput = modalEl.querySelector('#report-title-input');
+        const descriptionInput = modalEl.querySelector('#report-description-input');
+        if (mode === 'edit' && report) {
+            if (titleInput) {
+                titleInput.value = report.title || '';
+            }
+            if (descriptionInput) {
+                descriptionInput.value = report.description || '';
+            }
+        } else {
+            if (titleInput) {
+                titleInput.value = '';
+            }
+            if (descriptionInput) {
+                descriptionInput.value = '';
+            }
+        }
+
+        state.reportModal.show();
+    }
+
+    function handleSaveReport() {
+        const modalEl = document.getElementById('report-builder-modal');
+        if (!modalEl) {
+            console.warn('Report builder modal missing');
+            return;
+        }
+
+        const title = (modalEl.querySelector('#report-title-input')?.value || '').trim();
+        const description = (modalEl.querySelector('#report-description-input')?.value || '').trim();
+        const clusterIds = Array.from(state.selectedClusters.keys());
+        if (!clusterIds.length) {
+            alert('Select at least one cluster before saving the coverage report.');
+            return;
+        }
+
+        if (!title) {
+            alert('Please provide a title for the coverage report.');
+            return;
+        }
+
+        const payload = {
+            title,
+            description,
+            cluster_ids: clusterIds,
+            notes: {}
+        };
+
+        const headers = {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRFToken': state.csrfToken || getCookie('csrftoken')
+        };
+
+        const url = buildEndpoint(state.endpoints.reportsEndpoint);
+        if (!url) {
+            console.error('Reports endpoint not configured');
+            return;
+        }
+
+        fetchJSON(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload)
+        }).then(data => {
+            if (state.reportModal) {
+                state.reportModal.hide();
+            }
+            state.reportModalMode = 'create';
+            state.editingReportId = null;
+
+            const report = data.data || data;
+            loadReportList();
+
+            if (report && report.id) {
+                state.activeReportId = report.id;
+                loadReportDetail(report.id);
+            }
+        }).catch(error => {
+            console.error('Failed to save coverage report', error);
+            alert(error.message || 'Failed to save coverage report.');
+        });
+    }
+
+    function handleSaveReportChanges() {
+        if (!state.activeReportId) {
+            alert('Select a coverage report before saving changes.');
+            return;
+        }
+
+        const clusterIds = Array.from(state.selectedClusters.keys());
+        if (!clusterIds.length) {
+            alert('Select at least one cluster before saving the coverage report.');
+            return;
+        }
+
+        const url = buildEndpoint(state.endpoints.reportDetailBase, `${state.activeReportId}/`);
+        if (!url) {
+            console.error('Report detail endpoint not configured');
+            return;
+        }
+
+        const headers = {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRFToken': state.csrfToken || getCookie('csrftoken')
+        };
+
+        const payload = {
+            cluster_ids: clusterIds
+        };
+
+        fetchJSON(url, {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify(payload)
+        }).then(data => {
+            applyReportData(data);
+            loadReportList();
+        }).catch(error => {
+            console.error('Failed to update coverage report', error);
+            alert(error.message || 'Failed to update coverage report.');
+        });
+    }
+
+    function handleSaveReportMetadata() {
+        if (!state.editingReportId) {
+            console.warn('No report selected for editing');
+            return;
+        }
+
+        const modalEl = document.getElementById('report-builder-modal');
+        if (!modalEl) {
+            return;
+        }
+
+        const title = (modalEl.querySelector('#report-title-input')?.value || '').trim();
+        const description = (modalEl.querySelector('#report-description-input')?.value || '').trim();
+
+        if (!title) {
+            alert('Please provide a title for the coverage report.');
+            return;
+        }
+
+        const url = buildEndpoint(state.endpoints.reportDetailBase, `${state.editingReportId}/`);
+        if (!url) {
+            console.error('Report detail endpoint not configured');
+            return;
+        }
+
+        const headers = {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'X-CSRFToken': state.csrfToken || getCookie('csrftoken')
+        };
+
+        const payload = {
+            title,
+            description
+        };
+
+        fetchJSON(url, {
+            method: 'PATCH',
+            headers,
+            body: JSON.stringify(payload)
+        }).then(data => {
+            if (state.reportModal) {
+                state.reportModal.hide();
+            }
+            state.reportModalMode = 'create';
+            state.editingReportId = null;
+            applyReportData(data);
+            loadReportList();
+        }).catch(error => {
+            console.error('Failed to update coverage report metadata', error);
+            alert(error.message || 'Failed to update coverage report.');
+        });
+    }
+
+    function handleDeleteReport(reportId) {
+        const targetId = reportId || state.activeReportId;
+        if (!targetId) {
+            return;
+        }
+
+        if (!confirm('Delete this coverage report? This action cannot be undone.')) {
+            return;
+        }
+
+        const url = buildEndpoint(state.endpoints.reportDetailBase, `${targetId}/`);
+        if (!url) {
+            console.error('Report detail endpoint not configured');
+            return;
+        }
+
+        fetchJSON(url, {
+            method: 'DELETE',
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRFToken': state.csrfToken || getCookie('csrftoken')
+            }
+        }).then(() => {
+            if (targetId === state.activeReportId) {
+                state.activeReportId = null;
+                state.activeReport = null;
+            }
+            updateReportSummary(null);
+            setSelectedClustersFromIds([]);
+            loadReportList();
+        }).catch(error => {
+            console.error('Failed to delete coverage report', error);
+            alert(error.message || 'Failed to delete coverage report.');
+        });
+    }
+
     window.dashboardCustomClusters = {
         init(endpoints) {
             if (state.initialized) {
@@ -779,27 +1186,39 @@
             syncHiddenFilters();
             updateVizModeButtons();
 
-            const compareBtn = document.getElementById('compare-selected-btn');
-            if (compareBtn) {
-                compareBtn.addEventListener('click', event => {
-                    event.preventDefault();
-                    if (!state.selectedClusters.size) {
-                        return;
-                    }
-                    if (state.selectedClusters.size === 1) {
-                        const [onlyCluster] = getSelectedClustersArray();
-                        renderClusterDetail(onlyCluster);
-                    } else {
-                        renderMultiClusterSummary(getSelectedClustersArray());
-                    }
-                    refreshVisualizationForSelection();
-                });
-            }
-
             const trigger = document.getElementById('new-cluster-btn');
             if (trigger) {
                 trigger.addEventListener('click', () => openClusterModal({ mode: 'create' }));
             }
+
+            const newReportButton = document.getElementById('new-report-btn');
+            if (newReportButton) {
+                newReportButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    openCoverageReportModal({ mode: 'create' });
+                });
+            }
+
+            const saveReportButton = document.getElementById('save-report-btn');
+            if (saveReportButton) {
+                saveReportButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    if (state.reportModalMode === 'edit') {
+                        handleSaveReportMetadata();
+                    } else {
+                        handleSaveReport();
+                    }
+                });
+            }
+
+            const saveReportChangesButton = document.getElementById('save-report-changes-btn');
+            if (saveReportChangesButton) {
+                saveReportChangesButton.addEventListener('click', event => {
+                    event.preventDefault();
+                    handleSaveReportChanges();
+                });
+            }
+
         },
         refresh() {
             loadClusterList();
@@ -808,96 +1227,21 @@
         openModal(options) {
             openClusterModal(options);
         },
+        openReportModal(options) {
+            openCoverageReportModal(options || {});
+        },
         deleteCluster(clusterId) {
             return performClusterDeletion(clusterId);
         }
     };
 })();
-function handleVisualizationPanel(cluster) {
-    const title = document.getElementById('cluster-detail-title');
+function handleVisualizationPanel() {
     const placeholder = document.getElementById('cluster-placeholder');
-    const summaryEl = document.getElementById('cluster-summary');
-    if (!title || !summaryEl) return;
-
-    title.textContent = cluster.name || 'Custom Cluster';
+    const vizContainer = document.getElementById('cluster-visualizations');
     if (placeholder) {
         placeholder.classList.add('d-none');
     }
-
-    const members = (cluster.members || []).map(member => {
-        return `<li><strong>${member.code}</strong> – ${member.title || 'Untitled'} <span class="text-muted">(${member.state || 'N/A'})</span></li>`;
-    }).join('');
-    const summary = cluster.coverage_summary || {};
-
-    summaryEl.classList.remove('d-none');
-    const coverageSections = [];
-    if (summary.states && Object.keys(summary.states).length) {
-        const stateItems = Object.entries(summary.states).map(([code, count]) => `<li><strong>${code}</strong>: ${count}</li>`).join('');
-        coverageSections.push(`<div class="mb-2"><strong>States</strong><ul class="mb-0 ps-3 small">${stateItems}</ul></div>`);
-    }
-    if (summary.subjects && Object.keys(summary.subjects).length) {
-        const subjectItems = Object.entries(summary.subjects).map(([name, count]) => `<li><strong>${name}</strong>: ${count}</li>`).join('');
-        coverageSections.push(`<div class="mb-2"><strong>Subjects</strong><ul class="mb-0 ps-3 small">${subjectItems}</ul></div>`);
-    }
-    if (summary.grades && Object.keys(summary.grades).length) {
-        const gradeItems = Object.entries(summary.grades).map(([grade, count]) => `<li><strong>${grade}</strong>: ${count}</li>`).join('');
-        coverageSections.push(`<div class="mb-2"><strong>Grades</strong><ul class="mb-0 ps-3 small">${gradeItems}</ul></div>`);
-    }
-
-    const editButtonMarkup = cluster.can_edit ? `
-        <div class="d-flex justify-content-end gap-2 mb-3">
-            <button type="button" class="btn btn-sm btn-outline-primary" data-edit-cluster="${cluster.id}">
-                <i class="fas fa-edit"></i> Edit Cluster
-            </button>
-            <button type="button" class="btn btn-sm btn-outline-danger" data-delete-cluster="${cluster.id}">
-                <i class="fas fa-trash-alt"></i> Delete Cluster
-            </button>
-        </div>
-    ` : '';
-
-    summaryEl.innerHTML = `
-        ${editButtonMarkup}
-        <p class="text-muted">${cluster.description || 'No description provided.'}</p>
-        <h6>Members (${cluster.standards_count})</h6>
-        <ul class="ps-3">${members || '<li>No standards yet.</li>'}</ul>
-        ${coverageSections.length ? `<h6 class="mt-3">Coverage Snapshot</h6>${coverageSections.join('')}` : ''}
-    `;
-
-    if (cluster.can_edit) {
-        const editButton = summaryEl.querySelector('[data-edit-cluster]');
-        if (editButton) {
-            editButton.addEventListener('click', event => {
-                event.preventDefault();
-                if (window.dashboardCustomClusters && typeof window.dashboardCustomClusters.openModal === 'function') {
-                    window.dashboardCustomClusters.openModal({ mode: 'edit', cluster });
-                }
-            });
-        }
-
-        const deleteButton = summaryEl.querySelector('[data-delete-cluster]');
-        if (deleteButton) {
-            deleteButton.addEventListener('click', event => {
-                event.preventDefault();
-                const confirmed = window.confirm('Delete this custom cluster? This action cannot be undone.');
-                if (!confirmed) {
-                    return;
-                }
-
-                const target = event.currentTarget;
-                const originalHtml = target.innerHTML;
-                target.disabled = true;
-                target.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Deleting...';
-
-                if (window.dashboardCustomClusters && typeof window.dashboardCustomClusters.deleteCluster === 'function') {
-                    window.dashboardCustomClusters.deleteCluster(cluster.id)
-                        .catch(err => {
-                            target.disabled = false;
-                            target.innerHTML = originalHtml;
-                            const message = (err && err.message) ? err.message : 'Unable to delete cluster.';
-                            window.alert(message);
-                        });
-                }
-            });
-        }
+    if (vizContainer) {
+        vizContainer.classList.remove('d-none');
     }
 }

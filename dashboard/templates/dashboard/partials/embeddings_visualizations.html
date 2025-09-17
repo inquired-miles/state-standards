@@ -191,11 +191,6 @@
             Similarity Matrix
         </button>
     </li>
-    <li class="nav-item" role="presentation">
-        <button class="nav-link" id="network-tab" data-bs-toggle="tab" data-bs-target="#network-pane" type="button" role="tab">
-            Network Graph
-        </button>
-    </li>
     {% if not simple_mode %}
     <li class="nav-item" role="presentation">
         <button class="nav-link" id="search-tab" data-bs-toggle="tab" data-bs-target="#search-pane" type="button" role="tab">
@@ -281,70 +276,6 @@
             </div>
             <div id="heatmap-description" class="mt-2"></div>
             <div id="heatmap-stats" class="mt-3"></div>
-        </div>
-    </div>
-
-    <div class="tab-pane fade" id="network-pane" role="tabpanel">
-        <div class="visualization-container">
-            <div class="row mb-3">
-                <div class="col-md-8">
-                    <h5 class="mb-0">
-                        <span id="network-title">🔗 Standards Relationship Network</span>
-                        <small class="text-muted ms-2">Scroll to zoom • Drag to pan • Drag nodes to reposition</small>
-                    </h5>
-                </div>
-                <div class="col-md-4 text-end">
-                    <div class="btn-group" role="group">
-                        <button class="btn btn-outline-primary btn-sm" onclick="resetNetworkLayout()"><i class="fas fa-redo"></i> Reset Layout</button>
-                        <button class="btn btn-outline-secondary btn-sm" onclick="exportNetworkGraph('png')"><i class="fas fa-download"></i> Export</button>
-                    </div>
-                </div>
-            </div>
-            <div class="row mb-3">
-                <div class="col-md-3">
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="show-common-concepts" checked>
-                        <label class="form-check-label" for="show-common-concepts">Show Common Concepts (5+ states)</label>
-                    </div>
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="show-semi-common-concepts" checked>
-                        <label class="form-check-label" for="show-semi-common-concepts">Show Semi-Common (2-4 states)</label>
-                    </div>
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="show-state-specific" checked>
-                        <label class="form-check-label" for="show-state-specific">Show State-Specific</label>
-                    </div>
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="show-standards" checked>
-                        <label class="form-check-label" for="show-standards">Show Standards</label>
-                    </div>
-                </div>
-                <div class="col-md-9 text-end">
-                    <small class="text-muted">Filter network nodes by concept type to focus on specific relationships.</small>
-                </div>
-            </div>
-            <div class="position-relative">
-                <div id="network-graph" class="network-graph"></div>
-                <div id="network-loading" class="loading-overlay d-none">
-                    <div class="spinner-border text-primary" role="status">
-                        <span class="visually-hidden">Loading network graph...</span>
-                    </div>
-                </div>
-            </div>
-            <div class="row mt-3">
-                <div class="col-md-6">
-                    <div id="network-stats" class="small text-muted"></div>
-                </div>
-                <div class="col-md-6 text-end">
-                    <div id="network-legend" class="small text-muted">
-                        <strong>Legend:</strong> 
-                        <span style="color: #FF6B6B;">●</span> Concepts | 
-                        <span style="color: #4ECDC4;">●</span> Standards | 
-                        <span style="border-bottom: 1px solid #999;">—</span> Implements | 
-                        <span style="border-bottom: 1px dashed #999;">- -</span> Similar
-                    </div>
-                </div>
-            </div>
         </div>
     </div>
 

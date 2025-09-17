@@ -3079,10 +3079,6 @@
                 console.log('Loading heatmap data');
                 loadSimilarityMatrix();
                 break;
-            case 'network-tab':
-                console.log('Loading network graph data');
-                loadNetworkGraph();
-                break;
             case 'themes-tab':
                 console.log('Loading themes data');
                 loadThemeCoverage();
@@ -3148,9 +3144,6 @@
                     break;
                 case '#heatmap-pane':
                     if (!currentData.heatmap) loadSimilarityMatrix();
-                    break;
-                case '#network-pane':
-                    if (!currentData.network) loadNetworkGraph();
                     break;
                 case '#themes-pane':
                     if (!currentData.themes) loadThemeCoverage();

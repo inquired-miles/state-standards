@@ -4,6 +4,7 @@ Topic discovery service for cross-state analysis
 import numpy as np
 from typing import List, Dict, Any, Optional, Iterable
 from django.db import transaction
+from django.utils import timezone
 from django.db.models import Count, Q
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import Counter
@@ -360,6 +361,43 @@ class CustomClusterService(BaseService):
                     )
                 )
             ClusterReportEntry.objects.bulk_create(entries)
+
+        return report
+
+    def replace_report_clusters(
+        self,
+        report: ClusterReport,
+        cluster_ids: Iterable[str],
+        notes: Optional[Dict[str, str]] = None,
+    ) -> ClusterReport:
+        """Replace clusters associated with a saved report."""
+        clusters = list(TopicCluster.objects.filter(id__in=cluster_ids))
+        clusters_by_id = {str(cluster.id): cluster for cluster in clusters}
+        ordered_clusters = [(idx, clusters_by_id.get(str(cid))) for idx, cid in enumerate(cluster_ids)]
+        ordered_clusters = [(idx, cluster) for idx, cluster in ordered_clusters if cluster]
+
+        if not ordered_clusters:
+            raise ValueError("No matching clusters found for provided IDs")
+
+        notes = notes or {}
+
+        with transaction.atomic():
+            report.clusterreportentry_set.all().delete()
+
+            entries = []
+            for order, cluster in ordered_clusters:
+                entries.append(
+                    ClusterReportEntry(
+                        report=report,
+                        cluster=cluster,
+                        selection_order=order,
+                        notes=notes.get(str(cluster.id), ''),
+                    )
+                )
+            ClusterReportEntry.objects.bulk_create(entries)
+
+            report.updated_at = timezone.now()
+            report.save(update_fields=['updated_at'])
 
         return report
 

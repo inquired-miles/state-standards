@@ -268,13 +268,29 @@ def cluster_report_detail_api(request, report_id: str):
         if request.method == 'PATCH':
             view.ensure_report_owner(report, user)
             data = view.parse_json_body(request)
+            cluster_ids = data.get('cluster_ids')
+            notes = data.get('notes') or {}
+            if cluster_ids is not None:
+                if not isinstance(cluster_ids, list) or not cluster_ids:
+                    return view.validation_error_response('cluster_ids must be a non-empty list')
+                report = view.service.replace_report_clusters(report, cluster_ids, notes=notes)
+
             if 'title' in data:
                 report.title = view.validate_string(data['title'], min_length=3, max_length=200, field_name='title')
             if 'description' in data:
                 report.description = data.get('description') or ''
             if 'is_shared' in data:
                 report.is_shared = bool(data['is_shared'])
-            report.save(update_fields=['title', 'description', 'is_shared', 'updated_at'])
+            update_fields = []
+            if 'title' in data:
+                update_fields.append('title')
+            if 'description' in data:
+                update_fields.append('description')
+            if 'is_shared' in data:
+                update_fields.append('is_shared')
+            if update_fields:
+                update_fields.append('updated_at')
+                report.save(update_fields=update_fields)
             summary = view.service.summarize_report(report)
             summary.update(view.serialize_report(report))
             return view.success_response(summary)
