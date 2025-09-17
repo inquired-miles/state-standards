@@ -922,6 +922,17 @@ class TopicCluster(models.Model):
     grade_levels = models.ManyToManyField(GradeLevel, related_name='topic_clusters')
     standards = models.ManyToManyField(Standard, related_name='topic_clusters', through='ClusterMembership')
     
+    # Optional source metadata for clusters imported from proxy runs
+    source_run = models.ForeignKey('ProxyRun', on_delete=models.SET_NULL, null=True, blank=True, related_name='derived_clusters')
+    source_proxy_id = models.CharField(max_length=100, blank=True, help_text="ID of the originating proxy (proxy_id)")
+    source_proxy_type = models.CharField(
+        max_length=20,
+        choices=[('topics', 'Topic-Based Proxy'), ('atoms', 'Atom Clustering Proxy'), ('standards', 'Standard Clustering Proxy')],
+        blank=True,
+        help_text="Type of the originating proxy"
+    )
+    source_title = models.CharField(max_length=255, blank=True, help_text="Snapshot of originating proxy title at time of import")
+    
     # Cluster quality metrics
     silhouette_score = models.FloatField(null=True, blank=True, help_text="Cluster quality metric (-1 to 1)")
     cohesion_score = models.FloatField(null=True, blank=True, help_text="Internal cluster cohesion (0-1)")
@@ -942,6 +953,7 @@ class TopicCluster(models.Model):
             models.Index(fields=['subject_area', 'standards_count']),
             models.Index(fields=['silhouette_score']),
             models.Index(fields=['origin', 'created_by']),
+            models.Index(fields=['source_proxy_type', 'source_proxy_id']),
         ]
         constraints = [
             models.UniqueConstraint(
@@ -955,6 +967,10 @@ class TopicCluster(models.Model):
     
     def __str__(self):
         return f"{self.name} ({self.standards_count} standards, {self.states_represented} states)"
+
+    @property
+    def is_imported_from_proxy(self) -> bool:
+        return bool(self.source_proxy_id and self.source_proxy_type)
 
 
 class ClusterMembership(models.Model):

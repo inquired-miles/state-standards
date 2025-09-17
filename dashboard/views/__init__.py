@@ -15,6 +15,7 @@ from .dashboard_views import (
 from .proxy_api_views import (
     proxy_run_coverage_api,
     proxy_run_proxies_api,
+    proxy_runs_list_api,
     generate_proxies_api,
     proxy_job_status_api,
     generate_standard_proxies_api,
@@ -47,6 +48,7 @@ from .custom_cluster_api_views import (
     custom_cluster_detail_api,
     cluster_reports_api,
     cluster_report_detail_api,
+    import_proxies_as_clusters_api,
 )
 
 from .atomization_api_views import (
@@ -72,6 +74,7 @@ __all__ = [
     # Proxy API views
     'proxy_run_coverage_api',
     'proxy_run_proxies_api',
+    'proxy_runs_list_api',
     'generate_proxies_api',
     'proxy_job_status_api',
     'generate_standard_proxies_api',
@@ -99,6 +102,7 @@ __all__ = [
     # Custom cluster APIs
     'custom_clusters_api',
     'custom_cluster_detail_api',
+    'import_proxies_as_clusters_api',
     'cluster_reports_api',
     'cluster_report_detail_api',
 

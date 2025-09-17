@@ -69,6 +69,89 @@ class ProxyAPIView(BaseAPIView):
 
 
 @api_endpoint(['GET'])
+def proxy_runs_list_api(request):
+    """List completed proxy runs with optional filters (run_type, grade, subject)."""
+    view = ProxyAPIView()
+    try:
+        run_type = request.GET.get('run_type')
+        status = request.GET.get('status', 'completed')
+        subject_area_id = request.GET.get('subject_area_id')
+        grades_param = request.GET.get('grades')
+        q = (request.GET.get('q') or '').strip().lower()
+
+        grade_levels = None
+        if grades_param:
+            grade_levels = view.validate_list_of_integers(grades_param, field_name="grades")
+            grade_levels = view.validate_grade_levels(grade_levels)
+
+        queryset = ProxyRun.objects.all().order_by('-started_at')
+        if status:
+            queryset = queryset.filter(status=status)
+        if run_type:
+            queryset = queryset.filter(run_type=run_type)
+
+        runs = []
+        for run in queryset[:100]:
+            # Subject filter check (post-filter on JSON)
+            if subject_area_id:
+                try:
+                    subj = int(subject_area_id)
+                except (TypeError, ValueError):
+                    return view.validation_error_response('subject_area_id must be an integer')
+                if (run.filter_parameters or {}).get('subject_area_id') != subj:
+                    continue
+
+            # Grade filter check
+            if grade_levels:
+                grades_ok = False
+                sel = (run.filter_parameters or {}).get('grade_selection') or {}
+                if sel.get('type') == 'specific':
+                    run_grades = set(int(g) for g in sel.get('grades', []) if isinstance(g, (int, str)))
+                    if run_grades & set(grade_levels):
+                        grades_ok = True
+                elif sel.get('type') == 'range':
+                    mn = sel.get('min_grade')
+                    mx = sel.get('max_grade')
+                    try:
+                        rng = set(range(int(mn), int(mx) + 1))
+                    except Exception:
+                        rng = set()
+                    if rng & set(grade_levels):
+                        grades_ok = True
+                else:
+                    # No grade filter on run; include
+                    grades_ok = True
+                if not grades_ok:
+                    continue
+
+            # Text search
+            if q:
+                blob = f"{run.name} {run.description} {run.filter_summary} {run.algorithm_summary}".lower()
+                if q not in blob:
+                    continue
+
+            runs.append({
+                'run_id': run.run_id,
+                'name': run.name,
+                'run_type': run.run_type,
+                'status': run.status,
+                'started_at': run.started_at,
+                'completed_at': run.completed_at,
+                'duration_seconds': run.duration_seconds,
+                'total_input_standards': run.total_input_standards,
+                'total_proxies_created': run.total_proxies_created,
+                'outlier_proxies_count': run.outlier_proxies_count,
+                'filter_summary': run.filter_summary,
+                'algorithm_summary': run.algorithm_summary,
+            })
+
+        return view.success_response({'runs': runs})
+    except ValidationError as e:
+        return view.validation_error_response(str(e))
+    except Exception as e:
+        return view.handle_exception(request, e)
+
+@api_endpoint(['GET'])
 def proxy_run_coverage_api(request):
     """Return per-state coverage for a given run with validation and pagination"""
     view = ProxyAPIView()
@@ -273,6 +356,8 @@ def proxy_run_proxies_api(request):
         if grades_param:
             grade_levels = view.validate_list_of_integers(grades_param, field_name="grades")
             grade_levels = view.validate_grade_levels(grade_levels)
+        subject_area_id = request.GET.get('subject_area_id')
+        subject_area_id = int(subject_area_id) if subject_area_id else None
         
         # Get proxy run
         try:
@@ -312,6 +397,8 @@ def proxy_run_proxies_api(request):
                     member_query = member_query.filter(
                         standard__grade_levels__grade_numeric__in=grade_levels
                     ).distinct()
+                if subject_area_id:
+                    member_query = member_query.filter(standard__subject_area_id=subject_area_id)
                 covered_ids.update(member_query.values_list('standard_id', flat=True))
                 
             elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
@@ -322,6 +409,8 @@ def proxy_run_proxies_api(request):
                     member_query = member_query.filter(
                         grade_levels__grade_numeric__in=grade_levels
                     ).distinct()
+                if subject_area_id:
+                    member_query = member_query.filter(subject_area_id=subject_area_id)
                 covered_ids.update(member_query.values_list('id', flat=True))
             
             covered_ids = list(covered_ids & scope_ids)
@@ -336,6 +425,12 @@ def proxy_run_proxies_api(request):
                 s['state__code'] for s in covered_standards if s['state__code']
             ))
             
+            # Determine proxy type badge
+            if hasattr(proxy, 'member_standards') and not hasattr(proxy, 'member_atoms'):
+                proxy_type = 'topics' if run.run_type == 'topics' else 'standards'
+            else:
+                proxy_type = getattr(proxy, 'source_type', 'atoms') or 'atoms'
+
             proxy_items.append({
                 'proxy_id': getattr(proxy, 'proxy_id', str(proxy.id)),
                 'title': getattr(proxy, 'title', '') or '',
@@ -344,6 +439,7 @@ def proxy_run_proxies_api(request):
                 'states_in_scope': unique_states_in_scope,
                 'covered_count': len(covered_standards),
                 'covered': covered_standards or [],
+                'proxy_type': proxy_type,
             })
         
         # Calculate overall not covered standards
