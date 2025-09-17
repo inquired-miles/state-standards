@@ -2,13 +2,24 @@
 Topic discovery service for cross-state analysis
 """
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterable
+from django.db import transaction
+from django.utils import timezone
 from django.db.models import Count, Q
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import Counter
 import re
 from .base import BaseService
-from ..models import Standard, TopicCluster, SubjectArea, GradeLevel, State
+from ..models import (
+    Standard,
+    TopicCluster,
+    ClusterMembership,
+    ClusterReport,
+    ClusterReportEntry,
+    SubjectArea,
+    GradeLevel,
+    State,
+)
 
 
 class TopicDiscoveryService(BaseService):
@@ -168,3 +179,301 @@ class TopicDiscoveryService(BaseService):
             'common_terms': common_words[:5],
             'silhouette_score': float(cluster['avg_similarity'])
         }
+
+
+class CustomClusterService(BaseService):
+    """Service helpers for managing user-authored topic clusters and reports"""
+
+    def __init__(self):
+        super().__init__()
+
+    def create_custom_cluster(
+        self,
+        *,
+        owner,
+        title: str,
+        standard_ids: Iterable[str],
+        description: str = '',
+        is_shared: bool = False,
+        search_context: Optional[Dict[str, Any]] = None,
+        similarity_map: Optional[Dict[str, float]] = None,
+    ) -> TopicCluster:
+        """Create a user-authored cluster from selected standard IDs"""
+        if not standard_ids:
+            raise ValueError("standard_ids must contain at least one entry")
+
+        standards = list(
+            Standard.objects.filter(id__in=standard_ids)
+            .select_related('state', 'subject_area')
+            .prefetch_related('grade_levels')
+        )
+        standards_by_id = {str(std.id): std for std in standards}
+        ordered_standards = []
+        for idx, standard_id in enumerate(standard_ids):
+            std = standards_by_id.get(str(standard_id))
+            if not std:
+                continue
+            ordered_standards.append((idx, std))
+
+        if not ordered_standards:
+            raise ValueError("No matching standards found for provided IDs")
+
+        similarity_map = similarity_map or {}
+        search_context = search_context or {}
+
+        with transaction.atomic():
+            cluster = TopicCluster.objects.create(
+                name=title,
+                description=description,
+                origin='custom',
+                created_by=owner,
+                is_shared=is_shared,
+                search_context=search_context,
+                subject_area=self._infer_subject_area(std for _, std in ordered_standards)
+            )
+
+            grade_levels = self._collect_grade_levels(std for _, std in ordered_standards)
+            if grade_levels:
+                cluster.grade_levels.set(grade_levels)
+
+            memberships = []
+            for order, standard in ordered_standards:
+                similarity = similarity_map.get(str(standard.id))
+                memberships.append(
+                    ClusterMembership(
+                        cluster=cluster,
+                        standard=standard,
+                        added_by=owner,
+                        selection_order=order,
+                        similarity_score=similarity,
+                        membership_strength=similarity if similarity is not None else 1.0,
+                    )
+                )
+            ClusterMembership.objects.bulk_create(memberships)
+
+            self._update_cluster_metrics(cluster, [std for _, std in ordered_standards])
+
+        return cluster
+
+    def update_custom_cluster(
+        self,
+        cluster: TopicCluster,
+        *,
+        standard_ids: Iterable[str],
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        is_shared: Optional[bool] = None,
+        search_context: Optional[Dict[str, Any]] = None,
+        similarity_map: Optional[Dict[str, float]] = None,
+        acting_user=None,
+    ) -> TopicCluster:
+        """Replace cluster membership and metadata for a user-authored cluster"""
+        if cluster.origin != 'custom':
+            raise ValueError("Only custom clusters can be updated via this service")
+
+        standards = list(
+            Standard.objects.filter(id__in=standard_ids)
+            .select_related('state', 'subject_area')
+            .prefetch_related('grade_levels')
+        )
+        standards_by_id = {str(std.id): std for std in standards}
+        ordered = [(idx, standards_by_id.get(str(sid))) for idx, sid in enumerate(standard_ids)]
+        ordered = [(idx, std) for idx, std in ordered if std]
+
+        if not ordered:
+            raise ValueError("No matching standards found for provided IDs")
+
+        similarity_map = similarity_map or {}
+
+        with transaction.atomic():
+            ClusterMembership.objects.filter(cluster=cluster).delete()
+
+            memberships = []
+            for order, standard in ordered:
+                similarity = similarity_map.get(str(standard.id))
+                memberships.append(
+                    ClusterMembership(
+                        cluster=cluster,
+                        standard=standard,
+                        added_by=acting_user,
+                        selection_order=order,
+                        similarity_score=similarity,
+                        membership_strength=similarity if similarity is not None else 1.0,
+                    )
+                )
+            ClusterMembership.objects.bulk_create(memberships)
+
+            if description is not None:
+                cluster.description = description
+            if is_shared is not None:
+                cluster.is_shared = is_shared
+            if search_context is not None:
+                cluster.search_context = search_context
+            if title is not None:
+                cluster.name = title
+
+            grade_levels = self._collect_grade_levels(std for _, std in ordered)
+            if grade_levels is not None:
+                cluster.grade_levels.set(grade_levels)
+
+            self._update_cluster_metrics(cluster, [std for _, std in ordered])
+
+        cluster.save(update_fields=['name', 'description', 'is_shared', 'search_context'])
+        return cluster
+
+    def create_report(
+        self,
+        *,
+        owner,
+        title: str,
+        cluster_ids: Iterable[str],
+        description: str = '',
+        is_shared: bool = False,
+        notes: Optional[Dict[str, str]] = None,
+    ) -> ClusterReport:
+        """Persist a collection of clusters for later comparison"""
+        clusters = list(TopicCluster.objects.filter(id__in=cluster_ids))
+        clusters_by_id = {str(cluster.id): cluster for cluster in clusters}
+        ordered_clusters = [(idx, clusters_by_id.get(str(cid))) for idx, cid in enumerate(cluster_ids)]
+        ordered_clusters = [(idx, cluster) for idx, cluster in ordered_clusters if cluster]
+
+        if not ordered_clusters:
+            raise ValueError("No matching clusters found for provided IDs")
+
+        notes = notes or {}
+
+        with transaction.atomic():
+            report = ClusterReport.objects.create(
+                title=title,
+                description=description,
+                created_by=owner,
+                is_shared=is_shared,
+            )
+
+            entries = []
+            for order, cluster in ordered_clusters:
+                entries.append(
+                    ClusterReportEntry(
+                        report=report,
+                        cluster=cluster,
+                        selection_order=order,
+                        notes=notes.get(str(cluster.id), ''),
+                    )
+                )
+            ClusterReportEntry.objects.bulk_create(entries)
+
+        return report
+
+    def replace_report_clusters(
+        self,
+        report: ClusterReport,
+        cluster_ids: Iterable[str],
+        notes: Optional[Dict[str, str]] = None,
+    ) -> ClusterReport:
+        """Replace clusters associated with a saved report."""
+        clusters = list(TopicCluster.objects.filter(id__in=cluster_ids))
+        clusters_by_id = {str(cluster.id): cluster for cluster in clusters}
+        ordered_clusters = [(idx, clusters_by_id.get(str(cid))) for idx, cid in enumerate(cluster_ids)]
+        ordered_clusters = [(idx, cluster) for idx, cluster in ordered_clusters if cluster]
+
+        if not ordered_clusters:
+            raise ValueError("No matching clusters found for provided IDs")
+
+        notes = notes or {}
+
+        with transaction.atomic():
+            report.clusterreportentry_set.all().delete()
+
+            entries = []
+            for order, cluster in ordered_clusters:
+                entries.append(
+                    ClusterReportEntry(
+                        report=report,
+                        cluster=cluster,
+                        selection_order=order,
+                        notes=notes.get(str(cluster.id), ''),
+                    )
+                )
+            ClusterReportEntry.objects.bulk_create(entries)
+
+            report.updated_at = timezone.now()
+            report.save(update_fields=['updated_at'])
+
+        return report
+
+    def summarize_cluster(self, cluster: TopicCluster) -> Dict[str, Any]:
+        """Aggregate subject/state/grade coverage for a cluster"""
+        member_qs = Standard.objects.filter(topic_clusters=cluster).select_related('state', 'subject_area').prefetch_related('grade_levels')
+        standards = list(member_qs)
+        if not standards:
+            return {
+                'standards_count': 0,
+                'states': {},
+                'subjects': {},
+                'grades': {},
+            }
+
+        states = Counter(std.state.code if std.state else 'Unknown' for std in standards)
+        subjects = Counter(std.subject_area.name if std.subject_area else 'Unknown' for std in standards)
+        grades = Counter()
+        for std in standards:
+            for grade in std.grade_levels.all():
+                grades[grade.grade] += 1
+
+        return {
+            'standards_count': len(standards),
+            'states': dict(states),
+            'subjects': dict(subjects),
+            'grades': dict(grades),
+        }
+
+    def summarize_report(self, report: ClusterReport) -> Dict[str, Any]:
+        """Combine coverage summaries for all clusters in a report"""
+        summaries = []
+        for entry in report.clusterreportentry_set.select_related('cluster').order_by('selection_order'):
+            summaries.append({
+                'cluster_id': str(entry.cluster_id),
+                'cluster_name': entry.cluster.name,
+                'selection_order': entry.selection_order,
+                'notes': entry.notes,
+                'summary': self.summarize_cluster(entry.cluster)
+            })
+
+        return {
+            'report_id': str(report.id),
+            'title': report.title,
+            'clusters': summaries,
+        }
+
+    def _collect_grade_levels(self, standards: Iterable[Standard]) -> List[GradeLevel]:
+        grade_ids = set()
+        for standard in standards:
+            for grade in standard.grade_levels.all():
+                grade_ids.add(grade.id)
+        if not grade_ids:
+            return []
+        return list(GradeLevel.objects.filter(id__in=grade_ids))
+
+    def _infer_subject_area(self, standards: Iterable[Standard]) -> SubjectArea:
+        subject_ids = [standard.subject_area_id for standard in standards if standard.subject_area_id]
+        if not subject_ids:
+            raise ValueError("Unable to determine subject area for custom cluster")
+        primary_id = subject_ids[0]
+        return SubjectArea.objects.get(id=primary_id)
+
+    def _update_cluster_metrics(self, cluster: TopicCluster, standards: List[Standard]) -> None:
+        cluster.standards_count = len(standards)
+        cluster.states_represented = len({std.state_id for std in standards if std.state_id})
+        centroid = self._calculate_centroid(standards)
+        update_fields = ['standards_count', 'states_represented']
+        if centroid is not None:
+            cluster.embedding = centroid
+            update_fields.append('embedding')
+        cluster.save(update_fields=update_fields)
+
+    def _calculate_centroid(self, standards: Iterable[Standard]) -> Optional[List[float]]:
+        vectors = [std.embedding for std in standards if std.embedding is not None]
+        if not vectors:
+            return None
+        centroid = np.mean(np.array(vectors, dtype=np.float32), axis=0)
+        return centroid.tolist()

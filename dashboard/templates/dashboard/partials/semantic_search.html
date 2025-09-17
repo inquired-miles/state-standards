@@ -1,0 +1,83 @@
+<div class="semantic-search" data-semantic-search data-mode="{{ mode|default:'view' }}">
+    <h5 class="mb-3">{{ title|default:'Semantic Concept Search' }}</h5>
+    <div class="row">
+        <div class="col-md-8">
+            <div class="input-group mb-3">
+                <input type="text" class="form-control" data-search-query placeholder="Enter educational concept (e.g., 'fraction operations', 'algebraic thinking')">
+                <button class="btn btn-primary" type="button" data-search-button>Search</button>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <select class="form-select" data-search-limit>
+                <option value="10">Top 10 Results</option>
+                <option value="20" selected>Top 20 Results</option>
+                <option value="50">Top 50 Results</option>
+                <option value="100">Top 100 Results</option>
+                <option value="500">All Results</option>
+            </select>
+        </div>
+    </div>
+
+    {% if enable_filters %}
+    <div class="row g-3 mb-3" data-search-filters>
+        <div class="col-md-4">
+            <label class="form-label small mb-1">Subject Area</label>
+            <select class="form-select form-select-sm" data-filter-subject>
+                <option value="">All Subjects</option>
+                {% for subject in subject_areas %}
+                <option value="{{ subject.id }}">{{ subject.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label small mb-1">Grade Level</label>
+            <select class="form-select form-select-sm" data-filter-grade>
+                <option value="">All Grades</option>
+                {% for grade in grade_levels %}
+                <option value="{{ grade.grade_numeric }}">{{ grade.grade }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label small mb-1">State</label>
+            <select class="form-select form-select-sm" data-filter-state>
+                <option value="">All States</option>
+                {% for state in states %}
+                <option value="{{ state.code }}">{{ state.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if enable_selection %}
+    <div class="mt-3" data-selection-panel>
+        <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+            <h6 class="mb-0">Selected Standards (<span data-selection-count>0</span>)</h6>
+            <div class="d-flex gap-2">
+                <button type="button" class="btn btn-outline-secondary" data-clear-selection>Clear Selection</button>
+                <button type="button" class="btn btn-primary" data-confirm-selection>Save Cluster</button>
+            </div>
+        </div>
+        <div class="selected-results small" data-selected-list></div>
+    </div>
+    {% endif %}
+
+    <div class="d-none text-center" data-search-loading>
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-2">Searching...</p>
+    </div>
+
+    <div class="d-none" data-results-container>
+        <div class="row">
+            <div class="col-md-8">
+                <h6>Search Results</h6>
+                <div class="search-results" data-results-list></div>
+            </div>
+            <div class="col-md-4">
+                <h6>State Emphasis Ranking</h6>
+                <div class="search-results" data-state-emphasis></div>
+            </div>
+        </div>
+    </div>
+</div>

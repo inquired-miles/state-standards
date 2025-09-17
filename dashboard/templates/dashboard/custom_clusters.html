@@ -1,0 +1,214 @@
+{% extends "dashboard/base.html" %}
+{% load static %}
+
+{% block title %}Custom Clusters · Dashboard{% endblock %}
+
+{% block extra_css %}
+<style>
+    .custom-cluster-layout {
+        background: white;
+        border-radius: 10px;
+        padding: 1.5rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .cluster-sidebar {
+        border-right: 1px solid #dee2e6;
+    }
+    .cluster-list {
+        max-height: 450px;
+        overflow-y: auto;
+    }
+    .cluster-list .list-group-item {
+        cursor: pointer;
+    }
+    .cluster-detail {
+        min-height: 420px;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="dashboard-header">
+    <div class="container">
+        <h1 class="display-5">Custom Clusters</h1>
+        <p class="lead">Build and compare semantic groupings of standards using the same embeddings analytics available elsewhere in the dashboard.</p>
+    </div>
+</div>
+
+<div class="container">
+    <div class="row g-3">
+        <div class="col-lg-4 cluster-sidebar">
+            <div class="custom-cluster-layout mb-3">
+                <h5 class="mb-2">Saved Clusters</h5>
+                <p class="text-muted small">Select multiple clusters to compare their semantic coverage and relationships.</p>
+                <div class="cluster-list list-group" id="cluster-list">
+                    <div class="text-muted small">Loading clusters…</div>
+                </div>
+                <button class="btn btn-primary w-100 mt-3" id="new-cluster-btn">
+                    <i class="fas fa-plus"></i> Create Cluster from Search
+                </button>
+            </div>
+
+            <div class="custom-cluster-layout">
+                <h6 class="mb-2">Coverage Reports</h6>
+                <p class="text-muted small">Combine clusters to see total coverage across states, grades, and subjects.</p>
+                <div class="list-group" id="report-list">
+                    <div class="text-muted small">Loading reports…</div>
+                </div>
+                <button class="btn btn-outline-secondary w-100 mt-3" id="new-report-btn">
+                    <i class="fas fa-copy"></i> Start Coverage Report
+                </button>
+            </div>
+        </div>
+        <div class="col-lg-8">
+            <div class="custom-cluster-layout mb-3" id="report-summary" hidden>
+                <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+                    <div>
+                        <h4 class="mb-1" id="report-summary-title"></h4>
+                        <p class="mb-0" id="report-summary-description"></p>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <button type="button" class="btn btn-primary btn-sm" id="save-report-changes-btn" hidden>
+                            <i class="fas fa-save"></i> Save Report
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="custom-cluster-layout mb-3 d-flex flex-wrap gap-3 align-items-end">
+                <div class="flex-grow-1">
+                    <label for="cluster-grade-filter" class="form-label small mb-1">Grade Level</label>
+                    <select class="form-select" id="cluster-grade-filter">
+                        <option value="">All Grades</option>
+                        {% for grade in grade_levels %}
+                        <option value="{{ grade.grade_numeric }}">{{ grade.grade }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="flex-grow-1">
+                    <label for="cluster-subject-filter" class="form-label small mb-1">Subject Area</label>
+                    <select class="form-select" id="cluster-subject-filter">
+                        <option value="">All Subjects</option>
+                        {% for subject in subject_areas %}
+                        <option value="{{ subject.id }}">{{ subject.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="text-muted small">
+                    Adjust filters to compare selected clusters against the broader set of standards in this scope.
+                </div>
+            </div>
+            <div class="custom-cluster-layout cluster-detail" id="cluster-detail">
+                <div id="cluster-placeholder" class="text-muted">
+                    Use the controls on the left to load an existing cluster or start a new one from the semantic search workflow. Selected clusters will surface member standards, similarity scores, and coverage summaries here.
+                </div>
+                <div id="viz-mode-controls" class="d-flex justify-content-end align-items-center gap-2 mt-3 d-none">
+                    <span class="text-muted small">View</span>
+                    <div class="btn-group btn-group-sm" role="group" aria-label="Visualization mode">
+                        <button type="button" class="btn btn-outline-primary active" data-viz-mode="2d">
+                            <i class="fas fa-braille"></i> 2D
+                        </button>
+                        <button type="button" class="btn btn-outline-primary" data-viz-mode="3d">
+                            <i class="fas fa-cube"></i> 3D
+                        </button>
+                    </div>
+                </div>
+                <div id="cluster-visualizations" class="d-none">
+                    {% include "dashboard/partials/embeddings_visualizations.html" with simple_mode=True %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Cluster Builder Modal -->
+<div class="modal fade" id="cluster-builder-modal" tabindex="-1" aria-labelledby="cluster-builder-label" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="cluster-builder-label">Create Custom Cluster</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label" for="cluster-title-input">Cluster Title</label>
+                    <input type="text" class="form-control" id="cluster-title-input" placeholder="e.g., Fractions Mastery Set">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label" for="cluster-description-input">Description</label>
+                    <textarea class="form-control" id="cluster-description-input" rows="2" placeholder="Optional notes about this cluster"></textarea>
+                </div>
+                {% include 'dashboard/partials/semantic_search.html' with title='Search Standards to Add' enable_selection=True mode='select' enable_filters=True %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Coverage Report Modal -->
+<div class="modal fade" id="report-builder-modal" tabindex="-1" aria-labelledby="report-builder-label" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="report-builder-label">New Coverage Report</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <label class="form-label" for="report-title-input">Report Title</label>
+                <input type="text" class="form-control mb-3" id="report-title-input" placeholder="e.g., 5th Grade Math Coverage">
+
+                <label class="form-label" for="report-description-input">Notes (optional)</label>
+                <textarea class="form-control" id="report-description-input" rows="3" placeholder="Describe the focus of this coverage report"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="save-report-btn">
+                    <i class="fas fa-save"></i> Save Coverage Report
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'dashboard/js/embeddings.js' %}"></script>
+<script>
+    window.dashboardEmbeddings = window.dashboardEmbeddings || {};
+    if (typeof window.dashboardEmbeddings.setAutoInit === 'function') {
+        window.dashboardEmbeddings.setAutoInit(false);
+    } else {
+        window.dashboardEmbeddings.autoInit = false;
+    }
+    if (typeof window.dashboardEmbeddings.setEndpoints === 'function') {
+        window.dashboardEmbeddings.setEndpoints({
+            visualizationData: '{% url "dashboard:embeddings_visualization_data" %}',
+            clusterMatrix: '{% url "dashboard:embeddings_cluster_matrix" %}',
+            enhancedMatrix: '{% url "dashboard:embeddings_enhanced_matrix" %}',
+            networkGraph: '{% url "dashboard:embeddings_network_graph" %}',
+            semanticSearch: '{% url "dashboard:embeddings_semantic_search" %}'
+        });
+    }
+</script>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="{% static 'dashboard/js/semantic_search.js' %}?v=2"></script>
+<script src="{% static 'dashboard/js/embeddings_visualizations.js' %}"></script>
+<script src="{% static 'dashboard/js/custom_clusters.js' %}?v=3"></script>
+<script>
+    // Minimal bootstrapping; detailed logic will live in shared JS modules refactored from embeddings page
+    document.addEventListener('DOMContentLoaded', () => {
+        if (!window.dashboardCustomClusters) {
+            console.warn('Custom cluster JS bundle not yet loaded. TODO: hook up shared semantic search/visualization modules.');
+            return;
+        }
+        window.dashboardCustomClusters.init({
+            clustersEndpoint: '{% url "dashboard:custom_clusters_api" %}',
+            clusterDetailBase: '{% url "dashboard:custom_cluster_detail_api" "00000000-0000-0000-0000-000000000000" %}'.replace('00000000-0000-0000-0000-000000000000', ''),
+            reportsEndpoint: '{% url "dashboard:cluster_reports_api" %}',
+            reportDetailBase: '{% url "dashboard:cluster_report_detail_api" "00000000-0000-0000-0000-000000000000" %}'.replace('00000000-0000-0000-0000-000000000000', ''),
+            semanticSearchEndpoint: '{% url "dashboard:embeddings_semantic_search" %}',
+            csrfToken: '{{ csrf_token }}'
+        });
+    });
+</script>
+{% endblock %}

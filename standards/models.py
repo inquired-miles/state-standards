@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
 from django.conf import settings
@@ -892,6 +893,29 @@ class TopicCluster(models.Model):
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     embedding = create_vector_field(dimensions=1536, null=True, blank=True, help_text="Centroid embedding for cluster")
+    origin = models.CharField(
+        max_length=10,
+        choices=[('auto', 'Discovered'), ('custom', 'User Cluster')],
+        default='auto',
+        help_text="Whether the cluster was system-discovered or user-created",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='custom_topic_clusters',
+        help_text="Staff user who created the cluster when origin='custom'",
+    )
+    is_shared = models.BooleanField(
+        default=False,
+        help_text="Share custom cluster with other staff users",
+    )
+    search_context = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Serialized query/filters used when creating a custom cluster",
+    )
     
     # Cluster metadata
     subject_area = models.ForeignKey(SubjectArea, on_delete=models.CASCADE, related_name='topic_clusters')
@@ -917,6 +941,14 @@ class TopicCluster(models.Model):
         indexes = [
             models.Index(fields=['subject_area', 'standards_count']),
             models.Index(fields=['silhouette_score']),
+            models.Index(fields=['origin', 'created_by']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['created_by', 'name'],
+                condition=Q(origin='custom'),
+                name='unique_custom_cluster_per_owner_name'
+            )
         ]
         verbose_name = "Topic Cluster"
         verbose_name_plural = "Topic Clusters"
@@ -929,16 +961,80 @@ class ClusterMembership(models.Model):
     """Through model for Standard-TopicCluster relationship with membership strength"""
     standard = models.ForeignKey(Standard, on_delete=models.CASCADE)
     cluster = models.ForeignKey(TopicCluster, on_delete=models.CASCADE)
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='custom_cluster_memberships',
+        help_text="Staff user who added the standard when origin='custom'",
+    )
+    selection_order = models.PositiveIntegerField(
+        default=0,
+        help_text="Preserve manual ordering of standards inside a custom cluster",
+    )
+    similarity_score = models.FloatField(
+        null=True,
+        blank=True,
+        help_text="Semantic similarity score captured during selection",
+    )
     membership_strength = models.FloatField(
         validators=[MinValueValidator(0.0), MaxValueValidator(1.0)],
         help_text="How strongly this standard belongs to the cluster (0-1)"
     )
     created_at = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         unique_together = ['standard', 'cluster']
-        ordering = ['-membership_strength']
+        ordering = ['selection_order', '-membership_strength']
 
+
+class ClusterReport(models.Model):
+    """Saved grouping of topic clusters for comparison/coverage reporting"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='cluster_reports'
+    )
+    is_shared = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    clusters = models.ManyToManyField(
+        TopicCluster,
+        through='ClusterReportEntry',
+        related_name='cluster_reports'
+    )
+
+    class Meta:
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['created_by', 'is_shared'])
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['created_by', 'title'],
+                name='unique_cluster_report_per_owner_title'
+            )
+        ]
+
+    def __str__(self):
+        return self.title
+
+
+class ClusterReportEntry(models.Model):
+    """Through table linking reports to clusters with ordering metadata"""
+    report = models.ForeignKey(ClusterReport, on_delete=models.CASCADE)
+    cluster = models.ForeignKey(TopicCluster, on_delete=models.CASCADE)
+    selection_order = models.PositiveIntegerField(default=0)
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['report', 'cluster']
+        ordering = ['selection_order']
 
 class CoverageAnalysis(models.Model):
     """Model storing coverage analysis results"""

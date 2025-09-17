@@ -143,6 +143,19 @@ def embeddings_dashboard(request):
 
 
 @staff_member_required
+def custom_clusters_dashboard(request):
+    """Dashboard for managing user-created custom clusters and comparison reports"""
+    context = {
+        'title': 'Custom Clusters',
+        'subtitle': 'Curate semantic groups of standards and compare coverage across states',
+        'subject_areas': SubjectArea.objects.all(),
+        'grade_levels': GradeLevel.objects.all().order_by('grade_numeric'),
+        'states': State.objects.all().order_by('name'),
+    }
+    return render(request, 'dashboard/custom_clusters.html', context)
+
+
+@staff_member_required
 def proxy_runs_dashboard(request):
     """Proxy Runs Analysis Dashboard for viewing and comparing proxy generation results"""
     from standards.services.proxy_run_analyzer import ProxyRunAnalyzer

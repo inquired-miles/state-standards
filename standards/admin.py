@@ -9,7 +9,7 @@ from django.utils import timezone
 from django.http import HttpResponseRedirect, HttpResponse
 from .models import (
     State, SubjectArea, GradeLevel, Standard, StandardCorrelation,
-    Concept, TopicCluster, ClusterMembership, CoverageAnalysis,
+    Concept, TopicCluster, ClusterMembership, ClusterReport, ClusterReportEntry, CoverageAnalysis,
     ContentAlignment, ContentStandardMatch, StrategicPlan, CacheEntry,
     UploadJob, CorrelationJob, ProxyStandard, ProxyStateCoverage, StandardAtom,
     TopicBasedProxy, ProxyRun, ProxyRunReport
@@ -372,15 +372,37 @@ class ConceptAdmin(admin.ModelAdmin):
 
 @admin.register(TopicCluster)
 class TopicClusterAdmin(admin.ModelAdmin):
-    list_display = ('name', 'subject_area', 'standards_count', 'states_represented', 'silhouette_score', 'created_at')
-    list_filter = ('subject_area', 'grade_levels', 'silhouette_score', 'states_represented')
-    search_fields = ('name', 'description', 'common_terms')
+    list_display = (
+        'name',
+        'subject_area',
+        'origin',
+        'created_by',
+        'standards_count',
+        'states_represented',
+        'silhouette_score',
+        'created_at'
+    )
+    list_filter = (
+        'subject_area',
+        'grade_levels',
+        'silhouette_score',
+        'states_represented',
+        'origin',
+        'is_shared'
+    )
+    search_fields = ('name', 'description', 'common_terms', 'created_by__email', 'created_by__username')
     filter_horizontal = ('grade_levels',)
-    readonly_fields = ('id', 'standards_count', 'states_represented', 'created_at', 'updated_at')
+    readonly_fields = (
+        'id',
+        'standards_count',
+        'states_represented',
+        'created_at',
+        'updated_at'
+    )
     
     fieldsets = (
         ('Cluster Information', {
-            'fields': ('id', 'name', 'description', 'subject_area', 'grade_levels')
+            'fields': ('id', 'name', 'description', 'subject_area', 'grade_levels', 'origin', 'created_by', 'is_shared')
         }),
         ('Quality Metrics', {
             'fields': ('silhouette_score', 'cohesion_score', 'standards_count', 'states_represented')
@@ -393,6 +415,10 @@ class TopicClusterAdmin(admin.ModelAdmin):
             'fields': ('embedding',),
             'classes': ('collapse',)
         }),
+        ('Custom Cluster Context', {
+            'fields': ('search_context',),
+            'classes': ('collapse',)
+        }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
             'classes': ('collapse',)
@@ -403,6 +429,31 @@ class TopicClusterAdmin(admin.ModelAdmin):
 class ClusterMembershipInline(admin.TabularInline):
     model = ClusterMembership
     extra = 0
+    readonly_fields = ('created_at',)
+    fields = ('standard', 'membership_strength', 'selection_order', 'similarity_score', 'added_by', 'created_at')
+
+
+class ClusterReportEntryInline(admin.TabularInline):
+    model = ClusterReportEntry
+    extra = 0
+    fields = ('cluster', 'selection_order', 'notes')
+    autocomplete_fields = ('cluster',)
+
+
+@admin.register(ClusterReport)
+class ClusterReportAdmin(admin.ModelAdmin):
+    list_display = ('title', 'created_by', 'is_shared', 'updated_at')
+    list_filter = ('is_shared', 'created_at', 'updated_at')
+    search_fields = ('title', 'description', 'created_by__email', 'created_by__username')
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    inlines = (ClusterReportEntryInline,)
+
+
+@admin.register(ClusterReportEntry)
+class ClusterReportEntryAdmin(admin.ModelAdmin):
+    list_display = ('report', 'cluster', 'selection_order', 'created_at')
+    list_filter = ('report', 'cluster')
+    search_fields = ('report__title', 'cluster__name')
     readonly_fields = ('created_at',)
 
 

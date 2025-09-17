@@ -2,6 +2,10 @@
 Secure API views for embeddings visualization with proper validation and caching
 """
 from typing import Dict, List, Optional, Any
+from uuid import UUID
+import json
+import os
+import threading
 from django.http import JsonResponse
 from django.core.exceptions import ValidationError
 from django.db.models import Q, Avg
@@ -12,6 +16,7 @@ import umap
 import hdbscan
 from collections import Counter
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import PCA
 import re
 import nltk
 from nltk.tokenize import word_tokenize
@@ -26,6 +31,90 @@ from .base import BaseAPIView, api_endpoint
 from .utils import _categorize_theme_importance
 
 logger = logging.getLogger(__name__)
+
+_threading_lock = threading.Lock()
+_configured_threading_layer: Optional[str] = None
+_numba_disabled = False
+
+
+def ensure_numba_threading_layer(preferred: Optional[str] = None) -> Optional[str]:
+    """Ensure UMAP/Numba uses a threadsafe backend, falling back as needed."""
+    global _configured_threading_layer, _numba_disabled
+    if _configured_threading_layer:
+        if _configured_threading_layer == 'default':
+            # Treat legacy "default" configuration as effectively disabled so callers fall back.
+            return 'disabled'
+        return _configured_threading_layer
+    if _numba_disabled:
+        return 'disabled'
+
+    with _threading_lock:
+        if _configured_threading_layer:
+            return _configured_threading_layer
+
+        try:
+            from umap.umap_ import set_numba_threading_layer
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.debug(f"Unable to import set_numba_threading_layer: {exc}")
+            os.environ.setdefault('NUMBA_DISABLE_JIT', '1')
+            try:
+                import numba
+            except Exception as import_exc:  # pragma: no cover - numba missing
+                logger.error(f"Numba import failed during fallback: {import_exc}")
+            else:
+                numba.config.DISABLE_JIT = True
+            _numba_disabled = True
+            _configured_threading_layer = 'disabled'
+            logger.warning("Proceeding without numba threading layer support; advanced projections disabled")
+            return _configured_threading_layer
+
+        candidates: List[str] = []
+        if preferred:
+            candidates.append(preferred)
+        env_layer = os.environ.get('NUMBA_THREADING_LAYER')
+        if env_layer:
+            candidates.append(env_layer)
+        candidates.extend(['tbb', 'omp', 'workqueue'])
+
+        seen = set()
+        for layer in candidates:
+            normalized = (layer or '').strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            try:
+                set_numba_threading_layer(normalized)
+                logger.info(f"Configured numba threading layer: {normalized}")
+                _configured_threading_layer = normalized
+                return _configured_threading_layer
+            except ValueError as exc:
+                message = str(exc).lower()
+                if 'already set' in message or 'set to' in message:
+                    logger.debug(f"Numba threading layer already set: {normalized}")
+                    _configured_threading_layer = normalized
+                    return _configured_threading_layer
+                logger.debug(f"Numba threading layer {normalized} unavailable: {exc}")
+            except Exception as exc:  # pragma: no cover - best effort fallback
+                logger.debug(f"Failed to set numba threading layer {normalized}: {exc}")
+
+        try:
+            import numba
+        except Exception as exc:  # pragma: no cover - numba missing/unavailable
+            logger.error(f"Failed to import numba for fallback mode: {exc}")
+        else:
+            os.environ.setdefault('NUMBA_DISABLE_JIT', '1')
+            numba.config.DISABLE_JIT = True
+            _numba_disabled = True
+            _configured_threading_layer = 'disabled'
+            logger.warning("Numba JIT disabled; running UMAP in pure Python mode")
+            return _configured_threading_layer
+
+        # If numba is unavailable, degrade gracefully by disabling advanced projections
+        os.environ.setdefault('NUMBA_DISABLE_JIT', '1')
+        _numba_disabled = True
+        _configured_threading_layer = 'disabled'
+        logger.warning("Numba unavailable; falling back to basic embedding projections")
+        return _configured_threading_layer
 
 
 class EmbeddingsAPIView(BaseAPIView):
@@ -44,13 +133,21 @@ class EmbeddingsAPIView(BaseAPIView):
             logger.info(f"Cache MISS for key: {cache_key} - executing calculation function")
             try:
                 data = calculation_func()
-                cache.set(cache_key, data, ttl)
-                logger.info(f"Cache SET for key: {cache_key} - data calculated and cached")
+                if isinstance(data, dict) and data.get('error'):
+                    logger.warning(f"Skipping cache set for key {cache_key} due to error: {data.get('error')}")
+                else:
+                    cache.set(cache_key, data, ttl)
+                    logger.info(f"Cache SET for key: {cache_key} - data calculated and cached")
             except Exception as e:
                 logger.error(f"Error calculating data for cache key {cache_key}: {e}")
                 data = {}
         else:
             logger.info(f"Cache HIT for key: {cache_key} - returning cached data")
+            if isinstance(data, dict) and data.get('error'):
+                logger.warning(f"Cached data for key {cache_key} contains error '{data.get('error')}', clearing and recalculating")
+                cache.delete(cache_key)
+                return self.get_cached_or_calculate(cache_key, calculation_func, ttl)
+
             # Check if cached data looks like it has problematic cluster counts
             if isinstance(data, dict) and 'clusters' in data:
                 cluster_count = len(data.get('clusters', []))
@@ -62,6 +159,58 @@ class EmbeddingsAPIView(BaseAPIView):
                     return self.get_cached_or_calculate(cache_key, calculation_func, ttl)
         return data
 
+    def parse_standard_ids(self, request) -> List[str]:
+        """Parse and validate standard IDs provided in request (if any)"""
+        raw_ids = request.GET.getlist('standard_ids')
+        if len(raw_ids) == 1 and ',' in raw_ids[0]:
+            raw_ids = [part.strip() for part in raw_ids[0].split(',') if part.strip()]
+
+        cleaned_ids = []
+        for raw_id in raw_ids:
+            if not raw_id:
+                continue
+            try:
+                cleaned_ids.append(str(UUID(str(raw_id))))
+            except (ValueError, TypeError):
+                raise ValidationError(f"Invalid standard ID: {raw_id}")
+        return cleaned_ids
+
+    def parse_cluster_labels(self, request) -> Dict[str, List[str]]:
+        """Parse optional cluster label mapping for manual visualization coloring"""
+        raw_labels = request.GET.get('cluster_labels')
+        if not raw_labels:
+            return {}
+
+        try:
+            parsed = json.loads(raw_labels)
+        except json.JSONDecodeError:
+            raise ValidationError("cluster_labels must be valid JSON")
+
+        if not isinstance(parsed, dict):
+            raise ValidationError("cluster_labels must be a JSON object")
+
+        cleaned: Dict[str, List[str]] = {}
+        for raw_cluster_id, member_ids in parsed.items():
+            try:
+                cluster_id = str(UUID(str(raw_cluster_id)))
+            except (ValueError, TypeError):
+                raise ValidationError(f"Invalid cluster ID: {raw_cluster_id}")
+
+            if not isinstance(member_ids, list):
+                raise ValidationError("cluster_labels values must be lists of standard IDs")
+
+            cleaned_members: List[str] = []
+            for raw_member_id in member_ids:
+                try:
+                    cleaned_members.append(str(UUID(str(raw_member_id))))
+                except (ValueError, TypeError):
+                    raise ValidationError(f"Invalid standard ID in cluster_labels: {raw_member_id}")
+
+            if cleaned_members:
+                cleaned[cluster_id] = cleaned_members
+
+        return cleaned
+
 
 @api_endpoint(['GET'])
 def embeddings_visualization_data_api(request):
@@ -69,6 +218,10 @@ def embeddings_visualization_data_api(request):
     view = EmbeddingsAPIView()
     
     try:
+        # Parse explicit standard IDs if provided (custom cluster use case)
+        standard_ids = view.parse_standard_ids(request)
+        manual_cluster_labels = view.parse_cluster_labels(request)
+
         # Validate parameters
         grade_level = request.GET.get('grade_level')
         if grade_level and grade_level.strip():
@@ -94,74 +247,100 @@ def embeddings_visualization_data_api(request):
         viz_mode = request.GET.get('viz_mode', '2d')
         if viz_mode not in ['2d', '3d']:
             viz_mode = '2d'
+
+        refresh_cache_param = request.GET.get('refresh_cache')
+        force_refresh = False
+        if isinstance(refresh_cache_param, str):
+            normalized_refresh = refresh_cache_param.strip().lower()
+            if normalized_refresh in {'1', 'true', 'yes', 'force', 'refresh'}:
+                force_refresh = True
         
         # Create cache key for this specific request
-        cache_key = f"embeddings_viz_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}_{viz_mode}"
-        logger.info(f"Cache key: {cache_key} (cluster_size={cluster_size}, epsilon={epsilon})")
-        
+        if standard_ids or manual_cluster_labels:
+            cache_key = None
+            logger.info(
+                "Visualization request with explicit standards (%s) and manual clusters (%s)",
+                len(standard_ids),
+                len(manual_cluster_labels),
+            )
+        else:
+            cache_key = f"embeddings_viz_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}_{viz_mode}"
+            logger.info(f"Cache key: {cache_key} (cluster_size={cluster_size}, epsilon={epsilon})")
+            if force_refresh:
+                logger.info(f"Force refresh requested; clearing cache for key: {cache_key}")
+                cache.delete(cache_key)
+
         def calculate_visualization_data():
-            # Filter standards with proper query optimization
-            standards_query = Standard.objects.filter(
-                embedding__isnull=False
-            ).select_related('state', 'subject_area')
-            
-            if grade_level is not None:
-                standards_query = standards_query.filter(
-                    grade_levels__grade_numeric=grade_level
-                ).distinct()
-            
-            if subject_area_id:
-                standards_query = standards_query.filter(subject_area_id=subject_area_id)
-            
-            # Limit for performance and memory management
-            standards = list(standards_query[:2000])  # Increased limit but still reasonable
+            # Determine standards to analyze
+            if standard_ids:
+                standards_query = Standard.objects.filter(
+                    id__in=standard_ids,
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area').prefetch_related('grade_levels')
+                standards = list(standards_query)
+                # Preserve selection order
+                order_map = {sid: index for index, sid in enumerate(standard_ids)}
+                standards.sort(key=lambda s: order_map.get(str(s.id), 0))
+            else:
+                standards_query = Standard.objects.filter(
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area')
+
+                if grade_level is not None:
+                    standards_query = standards_query.filter(
+                        grade_levels__grade_numeric=grade_level
+                    ).distinct()
+
+                if subject_area_id:
+                    standards_query = standards_query.filter(subject_area_id=subject_area_id)
+
+                # Limit for performance and memory management
+                standards = list(standards_query[:2000])  # Increased limit but still reasonable
             
             if not standards:
                 # Provide detailed information about why no data was found
-                criteria_info = []
-                if grade_level is not None:
-                    criteria_info.append(f"grade level {grade_level}")
-                if subject_area_id:
-                    try:
-                        from standards.models import SubjectArea
-                        subject_area = SubjectArea.objects.get(id=subject_area_id)
-                        criteria_info.append(f"subject area '{subject_area.name}'")
-                    except:
-                        criteria_info.append(f"subject area ID {subject_area_id}")
-                
-                criteria_text = " and ".join(criteria_info) if criteria_info else "your filter criteria"
-                
-                # Check if standards exist without embeddings for better debugging
-                standards_without_embeddings_query = Standard.objects.all()
-                if grade_level is not None:
-                    standards_without_embeddings_query = standards_without_embeddings_query.filter(
-                        grade_levels__grade_numeric=grade_level
-                    ).distinct()
-                if subject_area_id:
-                    standards_without_embeddings_query = standards_without_embeddings_query.filter(
-                        subject_area_id=subject_area_id
-                    )
-                
-                total_matching_standards = standards_without_embeddings_query.count()
-                standards_with_embeddings_count = standards_without_embeddings_query.filter(
-                    embedding__isnull=False
-                ).count()
-                
-                # Provide specific guidance based on the situation
-                if total_matching_standards == 0:
-                    message = f'No standards found for {criteria_text}. Try different filter criteria.'
-                elif standards_with_embeddings_count == 0:
-                    message = f'Found {total_matching_standards} standards for {criteria_text}, but none have embeddings. Run the generate_embeddings management command to create embeddings.'
+                if standard_ids:
+                    message = 'No embeddings found for the selected standards.'
+                    debug_info = {
+                        'requested_standard_ids': standard_ids,
+                        'found_matching_standards': 0
+                    }
                 else:
-                    message = f'No standards with embeddings found for {criteria_text}'
-                
-                return {
-                    'scatter_data': [],
-                    'clusters': [],
-                    'state_colors': {},
-                    'total_standards': 0,
-                    'message': message,
-                    'debug_info': {
+                    criteria_info = []
+                    if grade_level is not None:
+                        criteria_info.append(f"grade level {grade_level}")
+                    if subject_area_id:
+                        try:
+                            subject_area = SubjectArea.objects.get(id=subject_area_id)
+                            criteria_info.append(f"subject area '{subject_area.name}'")
+                        except SubjectArea.DoesNotExist:
+                            criteria_info.append(f"subject area ID {subject_area_id}")
+
+                    criteria_text = " and ".join(criteria_info) if criteria_info else "your filter criteria"
+
+                    standards_without_embeddings_query = Standard.objects.all()
+                    if grade_level is not None:
+                        standards_without_embeddings_query = standards_without_embeddings_query.filter(
+                            grade_levels__grade_numeric=grade_level
+                        ).distinct()
+                    if subject_area_id:
+                        standards_without_embeddings_query = standards_without_embeddings_query.filter(
+                            subject_area_id=subject_area_id
+                        )
+
+                    total_matching_standards = standards_without_embeddings_query.count()
+                    standards_with_embeddings_count = standards_without_embeddings_query.filter(
+                        embedding__isnull=False
+                    ).count()
+
+                    if total_matching_standards == 0:
+                        message = f'No standards found for {criteria_text}. Try different filter criteria.'
+                    elif standards_with_embeddings_count == 0:
+                        message = f'Found {total_matching_standards} standards for {criteria_text}, but none have embeddings. Run the generate_embeddings management command to create embeddings.'
+                    else:
+                        message = f'No standards with embeddings found for {criteria_text}'
+
+                    debug_info = {
                         'total_standards_in_db': Standard.objects.count(),
                         'standards_with_embeddings': Standard.objects.filter(embedding__isnull=False).count(),
                         'standards_matching_criteria': total_matching_standards,
@@ -171,14 +350,52 @@ def embeddings_visualization_data_api(request):
                             'subject_area_id': subject_area_id
                         }
                     }
+
+                return {
+                    'scatter_data': [],
+                    'clusters': [],
+                    'state_colors': {},
+                    'manual_clusters': [],
+                    'total_standards': 0,
+                    'message': message,
+                    'debug_info': debug_info
                 }
             
+            manual_cluster_assignments: Dict[str, str] = {}
+            manual_cluster_counts: Dict[str, int] = {}
+            manual_cluster_metadata: List[Dict[str, Any]] = []
+            manual_cluster_colors: Dict[str, str] = {}
+            manual_cluster_names: Dict[str, str] = {}
+            manual_mode = bool(manual_cluster_labels)
+            if manual_cluster_labels:
+                for cluster_id, member_ids in manual_cluster_labels.items():
+                    for member_id in member_ids:
+                        manual_cluster_assignments[member_id] = cluster_id
+                    manual_cluster_counts[cluster_id] = 0
+
+                cluster_objects = TopicCluster.objects.filter(id__in=manual_cluster_labels.keys())
+                manual_cluster_names = {
+                    str(cluster.id): cluster.name for cluster in cluster_objects
+                }
+
             # Prepare color palette
             color_palette = [
                 '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57',
                 '#FF9FF3', '#54A0FF', '#5F27CD', '#00D2D3', '#FF9F43',
                 '#48CAE4', '#023E8A', '#FFB3BA', '#B5EAD7', '#C7CEEA'
             ]
+
+            if manual_cluster_labels:
+                for index, cluster_id in enumerate(manual_cluster_labels.keys()):
+                    color = color_palette[index % len(color_palette)]
+                    manual_cluster_colors[cluster_id] = color
+                    manual_cluster_metadata.append({
+                        'id': cluster_id,
+                        'name': manual_cluster_names.get(cluster_id, f'Cluster {index + 1}'),
+                        'color': color,
+                        'standards_count': 0,
+                        'index': index
+                    })
             
             # Build state color mapping
             state_colors = {}
@@ -220,6 +437,7 @@ def embeddings_visualization_data_api(request):
                     'scatter_data': [],
                     'clusters': [],
                     'state_colors': state_colors,
+                    'manual_clusters': manual_cluster_metadata,
                     'total_standards': 0,
                     'message': 'No valid embeddings found for visualization'
                 }
@@ -228,140 +446,164 @@ def embeddings_visualization_data_api(request):
             embeddings_matrix = np.array(embeddings_matrix)
             logger.info(f"Processing {len(embeddings_matrix)} embeddings with shape {embeddings_matrix.shape}")
             
-            # Perform UMAP dimensionality reduction (simplified)
-            try:
-                # Set n_components based on visualization mode
-                n_components = 3 if viz_mode == '3d' else 2
-                
-                # Phase 1: Adaptive UMAP parameters for better clustering
-                n_samples = len(embeddings_matrix)
-                
-                # Adaptive n_neighbors: smaller datasets need fewer neighbors for local structure
-                # Formula: min(max(5, sqrt(n_samples)), 50) capped by dataset size
-                import math
-                adaptive_n_neighbors = min(max(5, int(math.sqrt(n_samples))), 50, n_samples - 1)
-                
-                # Adaptive min_dist: smaller datasets benefit from tighter clustering
-                if n_samples < 100:
-                    adaptive_min_dist = 0.01  # Tight clusters for small datasets
-                elif n_samples < 500:
-                    adaptive_min_dist = 0.05  # Balanced for medium datasets
-                else:
-                    adaptive_min_dist = 0.1   # Standard for large datasets
-                
-                logger.info(f"UMAP adaptive parameters: n_samples={n_samples}, n_neighbors={adaptive_n_neighbors}, min_dist={adaptive_min_dist}")
-                
-                umap_reducer = umap.UMAP(
-                    n_components=n_components,
-                    n_neighbors=adaptive_n_neighbors,
-                    min_dist=adaptive_min_dist,
-                    metric='cosine',
-                    random_state=42
-                )
-                umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
-                logger.info(f"UMAP completed successfully")
-                
-                # Basic check for embedding quality
-                embedding_variance = np.var(umap_embeddings, axis=0).mean()
-                logger.info(f"UMAP embedding variance: {embedding_variance:.4f}")
-                
-                if embedding_variance < 0.01:
-                    logger.warning("Low UMAP embedding variance - may affect clustering quality")
-                
-            except Exception as e:
-                logger.error(f"UMAP failed: {e}")
-                # Fallback based on visualization mode
+            small_selection = bool(standard_ids) and len(embeddings_matrix) <= 10
+
+            threading_layer = ensure_numba_threading_layer()
+
+            cluster_labels = None
+
+            if small_selection:
+                logger.info("Using simplified projection for small custom selection")
                 if viz_mode == '3d':
                     if embeddings_matrix.shape[1] >= 3:
                         umap_embeddings = embeddings_matrix[:, :3]
                     else:
-                        # Pad with zeros if needed
                         umap_embeddings = np.pad(embeddings_matrix[:, :2], ((0, 0), (0, 1)), mode='constant')
                 else:
-                    umap_embeddings = embeddings_matrix[:, :2]
-            
-            # Perform HDBSCAN clustering with Phase 1 improvements
-            try:
-                # Use cluster_size directly as min_cluster_size (intuitive behavior)
-                # Smaller cluster_size = smaller min_cluster_size = MORE clusters
-                # Larger cluster_size = larger min_cluster_size = FEWER clusters
-                min_cluster_size = max(2, cluster_size)  # Direct control, minimum of 2
-                
-                # Phase 1: Add min_samples parameter for better noise handling
-                # min_samples controls how conservative the clustering is
-                # Lower min_samples = more aggressive clustering (finds more clusters)
-                min_samples = max(1, min_cluster_size // 2)
-                
-                logger.info(f"HDBSCAN parameters: min_cluster_size={min_cluster_size}, min_samples={min_samples}, epsilon={epsilon}")
-                
-                clusterer = hdbscan.HDBSCAN(
-                    min_cluster_size=min_cluster_size,
-                    min_samples=min_samples,
-                    metric='euclidean',
-                    cluster_selection_epsilon=epsilon
-                )
-                cluster_labels = clusterer.fit_predict(umap_embeddings)
-                
-                n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
-                n_noise = (cluster_labels == -1).sum()
-                n_total = len(embeddings_matrix)  # Add this back
-                
-                logger.info(f"HDBSCAN clustering: {n_clusters} clusters, {n_noise} noise points")
-                
-                # Log cluster size distribution for debugging
-                from collections import Counter
-                cluster_sizes = Counter(cluster_labels)
-                non_noise_sizes = [size for label, size in cluster_sizes.items() if label != -1]
-                if non_noise_sizes:
-                    logger.info(f"Cluster sizes: min={min(non_noise_sizes)}, max={max(non_noise_sizes)}, avg={sum(non_noise_sizes)/len(non_noise_sizes):.1f}")
-                    
-                    # Check for clustering quality issues
-                    max_cluster_size = max(non_noise_sizes)
-                    if max_cluster_size > n_total * 0.7:
-                        logger.warning(f"Dominant cluster detected: {max_cluster_size}/{n_total} ({max_cluster_size/n_total:.1%})")
-                else:
-                    logger.warning("No valid clusters found - all points are noise")
-                
-                # Enhanced retry logic with min_samples adjustment
-                if n_clusters == 0 and len(embeddings_matrix) > 10:
-                    logger.warning(f"Got zero clusters, retrying with more permissive settings")
-                    
-                    # Phase 1: Enhanced retry with both min_cluster_size and min_samples adjustment
-                    retry_min_size = max(2, min_cluster_size // 2)
-                    retry_min_samples = max(1, retry_min_size // 2)  # Adjust min_samples too
-                    retry_epsilon = min(1.0, epsilon * 1.5)  # More permissive
-                    
-                    logger.info(f"Retry with min_cluster_size={retry_min_size}, min_samples={retry_min_samples}, epsilon={retry_epsilon}")
-                    
-                    retry_clusterer = hdbscan.HDBSCAN(
-                        min_cluster_size=retry_min_size,
-                        min_samples=retry_min_samples,
-                        metric='euclidean',
-                        cluster_selection_epsilon=retry_epsilon
-                    )
-                    retry_labels = retry_clusterer.fit_predict(umap_embeddings)
-                    retry_n_clusters = len(set(retry_labels)) - (1 if -1 in retry_labels else 0)
-                    
-                    logger.info(f"Retry result: {retry_n_clusters} clusters")
-                    
-                    # Use retry result if we got any clusters
-                    if retry_n_clusters > 0:
-                        cluster_labels = retry_labels
-                        logger.info(f"Using retry clustering with {retry_n_clusters} clusters")
+                    if embeddings_matrix.shape[1] >= 2:
+                        umap_embeddings = embeddings_matrix[:, :2]
                     else:
-                        logger.warning("Retry also failed, keeping original results")
-                
-            except Exception as e:
-                logger.error(f"HDBSCAN failed: {e}")
-                # Try KMeans as fallback clustering method
-                logger.info("HDBSCAN failed completely, trying KMeans fallback")
-                cluster_labels = _fallback_kmeans_clustering(umap_embeddings, len(embeddings_matrix), cluster_size, logger)
-            
-            # First, identify weak clusters (less than 3 members)
-            from collections import Counter
-            cluster_sizes_check = Counter(cluster_labels)
-            weak_cluster_ids = {label for label, count in cluster_sizes_check.items() 
-                               if label != -1 and count < 3}
+                        umap_embeddings = np.pad(embeddings_matrix[:, :1], ((0, 0), (0, 1)), mode='constant')
+                cluster_labels = np.zeros(len(embeddings_matrix), dtype=int)
+            else:
+                n_components = 3 if viz_mode == '3d' else 2
+                if threading_layer == 'disabled':
+                    logger.info("Numba threading layer disabled; attempting projection with fallback mode")
+
+                try:
+                    n_samples = len(embeddings_matrix)
+                    import math
+                    adaptive_n_neighbors = min(max(5, int(math.sqrt(n_samples))), 50, n_samples - 1)
+                    if n_samples < 100:
+                        adaptive_min_dist = 0.01
+                    elif n_samples < 500:
+                        adaptive_min_dist = 0.05
+                    else:
+                        adaptive_min_dist = 0.1
+                    logger.info(f"UMAP adaptive parameters: n_samples={n_samples}, n_neighbors={adaptive_n_neighbors}, min_dist={adaptive_min_dist}")
+                    umap_reducer = umap.UMAP(
+                        n_components=n_components,
+                        n_neighbors=adaptive_n_neighbors,
+                        min_dist=adaptive_min_dist,
+                        metric='cosine',
+                        random_state=42
+                    )
+                    umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
+                    logger.info("UMAP completed successfully")
+                    embedding_variance = np.var(umap_embeddings, axis=0).mean()
+                    logger.info(f"UMAP embedding variance: {embedding_variance:.4f}")
+                    if embedding_variance < 0.01:
+                        logger.warning("Low UMAP embedding variance - may affect clustering quality")
+                except Exception as e:
+                    logger.error(f"UMAP failed: {e}")
+                    pca_fallback_used = False
+                    if threading_layer == 'disabled':
+                        try:
+                            target_components = min(n_components, embeddings_matrix.shape[1])
+                            if target_components >= 1:
+                                pca = PCA(n_components=target_components)
+                                umap_embeddings = pca.fit_transform(embeddings_matrix)
+                                if target_components < n_components:
+                                    umap_embeddings = np.pad(umap_embeddings, ((0, 0), (0, n_components - target_components)), mode='constant')
+                                pca_fallback_used = True
+                                logger.info("PCA fallback succeeded for projection")
+                        except Exception as pca_exc:
+                            logger.warning(f"PCA fallback failed: {pca_exc}")
+                    if not pca_fallback_used:
+                        if viz_mode == '3d':
+                            if embeddings_matrix.shape[1] >= 3:
+                                umap_embeddings = embeddings_matrix[:, :3]
+                            else:
+                                umap_embeddings = np.pad(embeddings_matrix[:, :2], ((0, 0), (0, 1)), mode='constant')
+                        else:
+                            if embeddings_matrix.shape[1] >= 2:
+                                umap_embeddings = embeddings_matrix[:, :2]
+                            else:
+                                umap_embeddings = np.pad(embeddings_matrix[:, :1], ((0, 0), (0, 1)), mode='constant')
+
+                if not manual_mode:
+                    try:
+                        min_cluster_size = max(2, cluster_size)
+                        min_samples = max(1, min_cluster_size // 2)
+                        logger.info(f"HDBSCAN parameters: min_cluster_size={min_cluster_size}, min_samples={min_samples}, epsilon={epsilon}")
+                        clusterer = hdbscan.HDBSCAN(
+                            min_cluster_size=min_cluster_size,
+                            min_samples=min_samples,
+                            metric='euclidean',
+                            cluster_selection_epsilon=epsilon
+                        )
+                        cluster_labels = clusterer.fit_predict(umap_embeddings)
+                        n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+                        n_noise = (cluster_labels == -1).sum()
+                        logger.info(f"HDBSCAN clustering: {n_clusters} clusters, {n_noise} noise points")
+                        from collections import Counter
+                        cluster_sizes = Counter(cluster_labels)
+                        non_noise_sizes = [size for label, size in cluster_sizes.items() if label != -1]
+                        if non_noise_sizes:
+                            logger.info(f"Cluster sizes: min={min(non_noise_sizes)}, max={max(non_noise_sizes)}, avg={sum(non_noise_sizes)/len(non_noise_sizes):.1f}")
+                        max_cluster_size = max(non_noise_sizes) if non_noise_sizes else 0
+                        if non_noise_sizes and max_cluster_size > n_total * 0.7:
+                            logger.warning(f"Dominant cluster detected: {max_cluster_size}/{n_total} ({max_cluster_size/n_total:.1%})")
+                    except Exception as e:
+                        logger.error(f"HDBSCAN failed: {e}")
+                        # Try KMeans as a fallback clustering method when HDBSCAN blows up completely
+                        logger.info("HDBSCAN failed completely, trying KMeans fallback")
+                        cluster_labels = np.asarray(
+                            _fallback_kmeans_clustering(
+                                umap_embeddings,
+                                len(embeddings_matrix),
+                                cluster_size,
+                                logger,
+                            )
+                        )
+                        unique_labels = set(cluster_labels.tolist())
+                        n_clusters = len(unique_labels) - (1 if -1 in unique_labels else 0)
+                        n_noise = int(np.sum(cluster_labels == -1))
+                    
+                    # Enhanced retry logic with min_samples adjustment
+                    if n_clusters == 0 and len(embeddings_matrix) > 10:
+                        logger.warning(f"Got zero clusters, retrying with more permissive settings")
+                        
+                        # Phase 1: Enhanced retry with both min_cluster_size and min_samples adjustment
+                        retry_min_size = max(2, min_cluster_size // 2)
+                        retry_min_samples = max(1, retry_min_size // 2)  # Adjust min_samples too
+                        retry_epsilon = min(1.0, epsilon * 1.5)  # More permissive
+                        
+                        logger.info(f"Retry with min_cluster_size={retry_min_size}, min_samples={retry_min_samples}, epsilon={retry_epsilon}")
+                        
+                        retry_clusterer = hdbscan.HDBSCAN(
+                            min_cluster_size=retry_min_size,
+                            min_samples=retry_min_samples,
+                            metric='euclidean',
+                            cluster_selection_epsilon=retry_epsilon
+                        )
+                        retry_labels = retry_clusterer.fit_predict(umap_embeddings)
+                        retry_n_clusters = len(set(retry_labels)) - (1 if -1 in retry_labels else 0)
+                        
+                        logger.info(f"Retry result: {retry_n_clusters} clusters")
+                        
+                        # Use retry result if we got any clusters
+                        if retry_n_clusters > 0:
+                            cluster_labels = retry_labels
+                            logger.info(f"Using retry clustering with {retry_n_clusters} clusters")
+                        else:
+                            logger.warning("Retry also failed, keeping original results")
+
+            if manual_mode:
+                cluster_index_map = {meta['id']: meta['index'] for meta in manual_cluster_metadata}
+                cluster_labels = np.full(len(valid_standards), -1, dtype=int)
+                for idx, standard in enumerate(valid_standards):
+                    cid = manual_cluster_assignments.get(str(standard.id))
+                    if cid is not None and cid in cluster_index_map:
+                        cluster_labels[idx] = cluster_index_map[cid]
+                n_clusters = len(cluster_index_map)
+                n_noise = int(np.sum(cluster_labels == -1))
+                weak_cluster_ids = set()
+            else:
+                from collections import Counter
+                cluster_sizes_check = Counter(cluster_labels)
+                weak_cluster_ids = {label for label, count in cluster_sizes_check.items() 
+                                   if label != -1 and count < 3}
             
             # Build scatter plot data with UMAP coordinates
             for i, standard in enumerate(valid_standards):
@@ -392,15 +634,107 @@ def embeddings_visualization_data_api(request):
                     'subject': standard.subject_area.name if standard.subject_area else 'Unknown',
                     'cluster': int(cluster_label) if cluster_label != -1 else -1
                 }
-                
+
                 # Add z-coordinate for 3D visualization
                 if viz_mode == '3d' and umap_embeddings.shape[1] >= 3:
                     data_point['z'] = float(umap_embeddings[i, 2])
-                
+
+                manual_cluster_id = manual_cluster_assignments.get(str(standard.id))
+                if manual_cluster_id:
+                    data_point['manual_cluster_id'] = manual_cluster_id
+                    data_point['manual_cluster_name'] = manual_cluster_names.get(
+                        manual_cluster_id,
+                        f"Cluster {manual_cluster_id[:8]}"
+                    )
+                    if manual_cluster_id in manual_cluster_colors:
+                        data_point['color'] = manual_cluster_colors[manual_cluster_id]
+                    manual_cluster_counts[manual_cluster_id] = manual_cluster_counts.get(manual_cluster_id, 0) + 1
+
                 scatter_data.append(data_point)
-            
-            # Generate real clusters from HDBSCAN results
-            clusters = _generate_real_clusters(valid_standards, umap_embeddings, cluster_labels, state_colors, viz_mode)
+
+            if manual_cluster_metadata:
+                for meta in manual_cluster_metadata:
+                    meta['standards_count'] = manual_cluster_counts.get(meta['id'], 0)
+
+            if manual_mode:
+                clusters = _generate_manual_clusters(
+                    valid_standards,
+                    umap_embeddings,
+                    cluster_labels,
+                    manual_cluster_metadata,
+                    viz_mode
+                )
+            else:
+                # Generate real clusters from HDBSCAN results
+                clusters = _generate_real_clusters(valid_standards, umap_embeddings, cluster_labels, state_colors, viz_mode)
+
+            # For explicitly selected standards with few items, synthesize a simple cluster
+            if standard_ids and not clusters and valid_standards:
+                from collections import Counter
+
+                # Calculate cluster center from embeddings
+                center = {
+                    'x': float(np.mean(umap_embeddings[:, 0]))
+                }
+                if umap_embeddings.shape[1] >= 2:
+                    center['y'] = float(np.mean(umap_embeddings[:, 1]))
+                if viz_mode == '3d' and umap_embeddings.shape[1] >= 3:
+                    center['z'] = float(np.mean(umap_embeddings[:, 2]))
+
+                # Estimate radius in 2D space
+                if umap_embeddings.shape[1] >= 2:
+                    distances = np.linalg.norm(
+                        umap_embeddings[:, :2] - np.array([center['x'], center.get('y', 0)]),
+                        axis=1
+                    )
+                    radius = float(np.max(distances)) if len(distances) else 0.0
+                else:
+                    radius = 0.0
+
+                state_distribution = Counter(
+                    std.state.code if std.state else 'Unknown' for std in valid_standards
+                )
+                key_topics = _extract_key_topics(valid_standards)[:8]
+
+                standards_details = []
+                for idx, standard in enumerate(valid_standards):
+                    display_title = standard.title or standard.description or f"Standard {str(standard.id)[:8]}"
+                    if len(display_title) > 80:
+                        display_title = display_title[:80] + '...'
+                    description = standard.description or "No description available"
+                    if len(description) > 200:
+                        description = description[:200] + '...'
+                    detail = {
+                        'id': str(standard.id),
+                        'title': display_title,
+                        'description': description,
+                        'state': standard.state.code if standard.state else 'Unknown',
+                        'state_name': standard.state.name if standard.state else 'Unknown',
+                        'subject_area': standard.subject_area.name if standard.subject_area else 'Unknown',
+                        'grade_levels': sorted(standard.grade_levels.values_list('grade_numeric', flat=True)) or [],
+                        'domain': getattr(standard, 'domain', ''),
+                        'cluster_id': manual_cluster_assignments.get(str(standard.id), 'manual')
+                    }
+                    if umap_embeddings.shape[1] >= 1:
+                        detail['x'] = float(umap_embeddings[idx, 0])
+                    if umap_embeddings.shape[1] >= 2:
+                        detail['y'] = float(umap_embeddings[idx, 1])
+                    if viz_mode == '3d' and umap_embeddings.shape[1] >= 3:
+                        detail['z'] = float(umap_embeddings[idx, 2])
+                    standards_details.append(detail)
+
+                clusters = [{
+                    'id': 0,
+                    'name': 'Selected Standards',
+                    'center': center,
+                    'radius': radius,
+                    'states': list(state_distribution.keys()),
+                    'key_topics': key_topics,
+                    'size': len(valid_standards),
+                    'standards_count': len(valid_standards),
+                    'state_distribution': dict(state_distribution),
+                    'standards': standards_details
+                }]
             
             # Calculate meaningful clustering statistics
             from collections import Counter
@@ -433,6 +767,7 @@ def embeddings_visualization_data_api(request):
                 'scatter_data': scatter_data,
                 'clusters': clusters,
                 'state_colors': state_colors,
+                'manual_clusters': manual_cluster_metadata,
                 'total_standards': len(scatter_data),
                 'clustered_standards': meaningful_clustered,  # Only count meaningful clusters
                 'unclustered_standards': effectively_unclustered,  # Include weak clusters as unclustered
@@ -447,16 +782,20 @@ def embeddings_visualization_data_api(request):
                 }
             }
         
-        # Cache enabled with auto-clearing of stale data
-        visualization_data = view.get_cached_or_calculate(cache_key, calculate_visualization_data)
-        
+        if cache_key:
+            visualization_data = view.get_cached_or_calculate(cache_key, calculate_visualization_data)
+        else:
+            visualization_data = calculate_visualization_data()
+
         # Add parameters to response
         visualization_data['parameters'] = {
             'grade_level': grade_level,
             'subject_area': subject_area_id,
             'cluster_size': cluster_size,
             'epsilon': epsilon,
-            'viz_mode': viz_mode
+            'viz_mode': viz_mode,
+            'standard_ids': standard_ids,
+            'refresh_cache': force_refresh
         }
         
         return view.success_response(visualization_data)
@@ -485,54 +824,111 @@ def embeddings_similarity_matrix_api(request):
             subject_area_id = view.validate_integer(subject_area_id, 1, None, "subject_area")
         
         # Create cache key
-        cache_key = f"similarity_matrix_{grade_level}_{subject_area_id}"
-        
+        cache_key = None
+        if not standard_ids:
+            cache_key = f"similarity_matrix_{grade_level}_{subject_area_id}"
+
         def calculate_similarity_matrix():
-            # Get states that have standards matching criteria
+            if standard_ids:
+                standards = list(Standard.objects.filter(
+                    id__in=standard_ids,
+                    embedding__isnull=False,
+                    state__isnull=False
+                ).select_related('state'))
+
+                if not standards:
+                    return {
+                        'states': [],
+                        'similarity_matrix': [],
+                        'error': 'No embeddings found for the selected standards'
+                    }
+
+                state_vectors = {}
+                for std in standards:
+                    try:
+                        vector = np.array(std.embedding, dtype=np.float32)
+                    except (TypeError, ValueError):
+                        continue
+                    state_vectors.setdefault(std.state.code, []).append(vector)
+
+                if not state_vectors:
+                    return {
+                        'states': [],
+                        'similarity_matrix': [],
+                        'error': 'Unable to compute state vectors for the selected standards'
+                    }
+
+                state_codes = sorted(state_vectors.keys())
+                centroids = {}
+                for code, vectors in state_vectors.items():
+                    centroids[code] = np.mean(np.stack(vectors), axis=0)
+
+                similarity_matrix = []
+                for code1 in state_codes:
+                    row = []
+                    vec1 = centroids[code1]
+                    norm1 = np.linalg.norm(vec1)
+                    for code2 in state_codes:
+                        if code1 == code2:
+                            similarity = 1.0
+                        else:
+                            vec2 = centroids[code2]
+                            norm2 = np.linalg.norm(vec2)
+                            if norm1 == 0 or norm2 == 0:
+                                similarity = 0.0
+                            else:
+                                similarity = float(np.dot(vec1, vec2) / (norm1 * norm2))
+                                similarity = max(-1.0, min(1.0, similarity))
+                        row.append(round(similarity, 3))
+                    similarity_matrix.append(row)
+
+                return {
+                    'states': state_codes,
+                    'similarity_matrix': similarity_matrix,
+                    'total_states': len(state_codes)
+                }
+
+            # Existing logic when no explicit standard IDs supplied
             states_query = State.objects.filter(
                 standards__embedding__isnull=False
             ).distinct()
-            
+
             if grade_level is not None:
                 states_query = states_query.filter(
                     standards__grade_levels__grade_numeric=grade_level
                 )
-            
+
             if subject_area_id:
                 states_query = states_query.filter(
                     standards__subject_area_id=subject_area_id
                 )
-            
+
             states = list(states_query.order_by('code'))
-            
+
             if not states:
                 return {
                     'states': [],
                     'similarity_matrix': [],
                     'error': 'No states found with standards matching the criteria'
                 }
-            
-            # Calculate similarity matrix with performance optimization
+
             similarity_matrix = []
             state_codes = [state.code for state in states]
-            
-            # Use batch queries for better performance
+
             correlations_cache = {}
             all_correlations = StandardCorrelation.objects.filter(
                 Q(standard_1__state__in=states) | Q(standard_2__state__in=states)
             ).select_related('standard_1__state', 'standard_2__state')
-            
-            # Build correlation lookup
+
             for corr in all_correlations:
                 state1_code = corr.standard_1.state.code
                 state2_code = corr.standard_2.state.code
                 key = tuple(sorted([state1_code, state2_code]))
-                
+
                 if key not in correlations_cache:
                     correlations_cache[key] = []
                 correlations_cache[key].append(corr.similarity_score)
-            
-            # Build matrix
+
             for state1 in states:
                 row = []
                 for state2 in states:
@@ -541,27 +937,30 @@ def embeddings_similarity_matrix_api(request):
                     else:
                         key = tuple(sorted([state1.code, state2.code]))
                         scores = correlations_cache.get(key, [])
-                        
+
                         if scores:
                             similarity = sum(scores) / len(scores)
                         else:
                             similarity = 0.0
-                    
+
                     row.append(round(similarity, 3))
                 similarity_matrix.append(row)
-            
+
             return {
                 'states': state_codes,
                 'similarity_matrix': similarity_matrix,
                 'total_states': len(state_codes)
             }
-        
-        matrix_data = view.get_cached_or_calculate(cache_key, calculate_similarity_matrix)
-        
-        # Add parameters to response
+
+        if cache_key:
+            matrix_data = view.get_cached_or_calculate(cache_key, calculate_similarity_matrix)
+        else:
+            matrix_data = calculate_similarity_matrix()
+
         matrix_data['parameters'] = {
             'grade_level': grade_level,
-            'subject_area': subject_area_id
+            'subject_area': subject_area_id,
+            'standard_ids': standard_ids
         }
         
         return view.success_response(matrix_data)
@@ -578,6 +977,7 @@ def embeddings_network_graph_api(request):
     view = EmbeddingsAPIView()
     
     try:
+        standard_ids = view.parse_standard_ids(request)
         # Validate parameters
         grade_level = request.GET.get('grade_level')
         if grade_level and grade_level.strip():
@@ -601,26 +1001,41 @@ def embeddings_network_graph_api(request):
         secondary_threshold = float(request.GET.get('secondary_threshold', 0.5))
         
         # Create cache key including clustering parameters
-        cache_key = f"network_graph_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
-        
+        manual_cluster_labels = view.parse_cluster_labels(request)
+
+        cache_key = None
+        if not standard_ids and not manual_cluster_labels:
+            cache_key = f"network_graph_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
+
         def calculate_network_graph():
-            # Get standards with embeddings for analysis
-            standards_query = Standard.objects.filter(
-                embedding__isnull=False
-            ).select_related('state', 'subject_area')
-            
-            if grade_level is not None:
-                standards_query = standards_query.filter(
-                    grade_levels__grade_numeric=grade_level
-                ).distinct()
-            
-            if subject_area_id:
-                standards_query = standards_query.filter(subject_area_id=subject_area_id)
-            
-            # Use the max_standards parameter from outer scope
-            standards = list(standards_query[:max_standards])
-            
-            if len(standards) < 10:
+            if standard_ids:
+                standards_query = Standard.objects.filter(
+                    id__in=standard_ids,
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area').prefetch_related('grade_levels')
+                standards = list(standards_query)
+                order_map = {sid: index for index, sid in enumerate(standard_ids)}
+                standards.sort(key=lambda s: order_map.get(str(s.id), 0))
+            else:
+                standards_query = Standard.objects.filter(
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area')
+
+                if grade_level is not None:
+                    standards_query = standards_query.filter(
+                        grade_levels__grade_numeric=grade_level
+                    ).distinct()
+
+                if subject_area_id:
+                    standards_query = standards_query.filter(subject_area_id=subject_area_id)
+
+                standards = list(standards_query[:max_standards])
+
+            min_required = 10
+            if standard_ids:
+                min_required = 2
+
+            if len(standards) < min_required:
                 return {
                     'nodes': [],
                     'edges': [],
@@ -653,39 +1068,187 @@ def embeddings_network_graph_api(request):
                 }
             
             embeddings_matrix = np.array(embeddings_matrix)
+            threading_layer = ensure_numba_threading_layer()
             
+            if manual_cluster_labels:
+                color_palette = [
+                    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57',
+                    '#FF9FF3', '#54A0FF', '#5F27CD', '#00D2D3', '#FF9F43',
+                    '#48CAE4', '#023E8A', '#FFB3BA', '#B5EAD7', '#C7CEEA'
+                ]
+                cluster_objects = TopicCluster.objects.filter(id__in=manual_cluster_labels.keys())
+                cluster_name_map = {str(cluster.id): cluster.name for cluster in cluster_objects}
+                standards_by_id = {str(std.id): std for std in valid_standards}
+
+                nodes = []
+                edges = []
+                cluster_analysis = {}
+                standard_nodes_added = set()
+
+                for index, (cluster_id, member_ids) in enumerate(manual_cluster_labels.items()):
+                    cluster_standards = [standards_by_id[sid] for sid in member_ids if sid in standards_by_id]
+                    if not cluster_standards:
+                        continue
+
+                    color = color_palette[index % len(color_palette)]
+                    concept_node_id = f'concept_manual_{index}'
+                    cluster_name = cluster_name_map.get(cluster_id, f'Cluster {index + 1}')
+
+                    nodes.append({
+                        'id': concept_node_id,
+                        'type': 'concept',
+                        'concept_type': 'manual',
+                        'label': cluster_name,
+                        'color': color,
+                        'size': 20 + len(cluster_standards),
+                        'cluster_size': len(cluster_standards),
+                        'total_standards': len(cluster_standards),
+                        'shown_standards': len(cluster_standards),
+                        'state_coverage': len({std.state.code for std in cluster_standards if std.state}),
+                        'coverage_percentage': 100.0,
+                        'implementing_states': [std.state.code for std in cluster_standards if std.state],
+                        'importance': 5,
+                        'keywords': _extract_key_topics(cluster_standards)
+                    })
+
+                    cluster_analysis[str(cluster_id)] = {
+                        'states': {std.state.code for std in cluster_standards if std.state},
+                        'coverage': 1.0,
+                        'type': 'manual',
+                        'name': cluster_name,
+                        'color': color,
+                        'importance': 5,
+                        'standards': cluster_standards
+                    }
+
+                    for std in cluster_standards:
+                        state_code = std.state.code if std.state else 'Unknown'
+                        standard_node_id = f'std_{std.id}'
+                        if standard_node_id not in standard_nodes_added:
+                            nodes.append({
+                                'id': standard_node_id,
+                                'type': 'standard',
+                                'label': (std.title or std.description or 'Standard')[:40] + '...',
+                                'state': state_code,
+                                'color': '#F0B27A',
+                                'size': 10,
+                                'concept_type': 'manual',
+                                'cluster_id': cluster_id,
+                                'cluster_type': 'manual',
+                                'full_text': std.description or std.title or ''
+                            })
+                            standard_nodes_added.add(standard_node_id)
+
+                        edges.append({
+                            'source': concept_node_id,
+                            'target': standard_node_id,
+                            'type': 'implements',
+                            'weight': 1.0,
+                            'style': 'solid',
+                            'color': '#95A5A6',
+                            'width': 2
+                        })
+
+                assigned_ids = {sid for ids in manual_cluster_labels.values() for sid in ids}
+                unassigned = [std for std in valid_standards if str(std.id) not in assigned_ids]
+                for std in unassigned:
+                    standard_node_id = f'std_{std.id}'
+                    if standard_node_id not in standard_nodes_added:
+                        nodes.append({
+                            'id': standard_node_id,
+                            'type': 'standard',
+                            'label': (std.title or std.description or 'Standard')[:40] + '...',
+                            'state': std.state.code if std.state else 'Unknown',
+                            'color': '#BDC3C7',
+                            'size': 8,
+                            'concept_type': 'unassigned',
+                            'cluster_id': 'unassigned',
+                            'cluster_type': 'unassigned',
+                            'full_text': std.description or std.title or ''
+                        })
+                        standard_nodes_added.add(standard_node_id)
+
+                return {
+                    'nodes': nodes,
+                    'edges': edges,
+                    'total_nodes': len(nodes),
+                    'total_edges': len(edges),
+                    'concept_count': len([n for n in nodes if n['type'] == 'concept']),
+                    'standard_count': len([n for n in nodes if n['type'] == 'standard']),
+                    'core_concept_count': len([n for n in nodes if n.get('concept_type') == 'manual']),
+                    'regional_concept_count': 0,
+                    'state_specific_count': len(unassigned),
+                    'states_represented': len({n.get('state') for n in nodes if n.get('state')}),
+                    'cluster_analysis': {
+                        cid: {
+                            'states': list(analysis['states']),
+                            'coverage': float(analysis['coverage']),
+                            'type': analysis['type'],
+                            'name': analysis['name'],
+                            'color': analysis['color'],
+                            'importance': int(analysis['importance']),
+                            'total_standards': len(analysis['standards']),
+                            'keywords': analysis.get('keywords', [])
+                        }
+                        for cid, analysis in cluster_analysis.items()
+                    }
+                }
+
             # Perform clustering to identify concepts
             try:
                 import umap
-                import hdbscan
                 from sklearn.metrics.pairwise import cosine_similarity
                 
-                # UMAP for dimensionality reduction
-                n_samples = len(embeddings_matrix)
-                import math
-                adaptive_n_neighbors = min(max(5, int(math.sqrt(n_samples))), 30, n_samples - 1)
-                
-                umap_reducer = umap.UMAP(
-                    n_components=2,
-                    n_neighbors=adaptive_n_neighbors,
-                    min_dist=0.1,
-                    metric='cosine',
-                    random_state=42
-                )
-                umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
-                
-                # HDBSCAN clustering to identify concepts - use same params as scatter plot
-                # Use cluster_size directly as min_cluster_size for consistency
-                min_cluster_size = max(2, cluster_size)  # Same as scatter plot
-                min_samples = max(1, min_cluster_size // 2)  # Same as scatter plot
-                
-                clusterer = hdbscan.HDBSCAN(
-                    min_cluster_size=min_cluster_size,
-                    min_samples=min_samples,
-                    metric='euclidean',
-                    cluster_selection_epsilon=epsilon  # Use epsilon from request
-                )
-                cluster_labels = clusterer.fit_predict(umap_embeddings)
+                if threading_layer == 'disabled':
+                    logger.warning("Numba threading unavailable; using direct embedding projection for network graph")
+                    if embeddings_matrix.shape[1] >= 2:
+                        umap_embeddings = embeddings_matrix[:, :2]
+                    else:
+                        umap_embeddings = np.pad(
+                            embeddings_matrix,
+                            ((0, 0), (0, max(0, 2 - embeddings_matrix.shape[1]))),
+                            mode='constant'
+                        )
+                else:
+                    # UMAP for dimensionality reduction
+                    n_samples = len(embeddings_matrix)
+                    import math
+                    adaptive_n_neighbors = min(max(5, int(math.sqrt(n_samples))), 30, n_samples - 1)
+                    
+                    umap_reducer = umap.UMAP(
+                        n_components=2,
+                        n_neighbors=adaptive_n_neighbors,
+                        min_dist=0.1,
+                        metric='cosine',
+                        random_state=42
+                    )
+                    umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
+
+                use_hdbscan = threading_layer != 'disabled'
+                if use_hdbscan:
+                    import hdbscan
+                    # HDBSCAN clustering to identify concepts - use same params as scatter plot
+                    # Use cluster_size directly as min_cluster_size for consistency
+                    min_cluster_size = max(2, cluster_size)  # Same as scatter plot
+                    min_samples = max(1, min_cluster_size // 2)  # Same as scatter plot
+
+                    clusterer = hdbscan.HDBSCAN(
+                        min_cluster_size=min_cluster_size,
+                        min_samples=min_samples,
+                        metric='euclidean',
+                        cluster_selection_epsilon=epsilon  # Use epsilon from request
+                    )
+                    cluster_labels = clusterer.fit_predict(umap_embeddings)
+                else:
+                    logger.info("Using KMeans fallback clustering for network graph")
+                    cluster_labels = _fallback_kmeans_clustering(
+                        umap_embeddings,
+                        len(valid_standards),
+                        max(cluster_size, 3),
+                        logger
+                    )
+
+                cluster_labels = np.asarray(cluster_labels)
                 
                 # Build enhanced network graph with core vs state-specific analysis
                 nodes = []
@@ -705,7 +1268,11 @@ def embeddings_network_graph_api(request):
                 all_states = set(std.state.code for std in valid_standards if std.state)
                 
                 # Get unique clusters (excluding noise -1)
-                unique_clusters = [int(c) for c in set(cluster_labels) if c != -1]
+                unique_clusters = [int(c) for c in set(cluster_labels.tolist()) if c != -1]
+                if not unique_clusters:
+                    logger.warning("No clusters returned; assigning all standards to a single cluster for network graph")
+                    cluster_labels = np.zeros(len(valid_standards), dtype=int)
+                    unique_clusters = [0]
                 
                 # Analyze each cluster for state coverage
                 cluster_analysis = {}
@@ -985,12 +1552,16 @@ def embeddings_network_graph_api(request):
                     'error': f'Network analysis failed: {str(e)}'
                 }
         
-        network_data = view.get_cached_or_calculate(cache_key, calculate_network_graph)
-        
+        if cache_key:
+            network_data = view.get_cached_or_calculate(cache_key, calculate_network_graph)
+        else:
+            network_data = calculate_network_graph()
+
         # Add parameters to response
         network_data['parameters'] = {
             'grade_level': grade_level,
-            'subject_area': subject_area_id
+            'subject_area': subject_area_id,
+            'standard_ids': standard_ids
         }
         
         return view.success_response(network_data)
@@ -1314,6 +1885,92 @@ def _generate_real_clusters(standards: List[Standard], umap_embeddings: np.ndarr
     # Sort clusters by size (largest first)
     clusters.sort(key=lambda x: x['standards_count'], reverse=True)
     
+    return clusters
+
+
+def _generate_manual_clusters(
+    standards: List[Standard],
+    umap_embeddings: np.ndarray,
+    cluster_labels: np.ndarray,
+    manual_metadata: List[Dict[str, Any]],
+    viz_mode: str = '2d'
+) -> List[Dict[str, Any]]:
+    clusters: List[Dict[str, Any]] = []
+    for meta in manual_metadata:
+        cluster_index = meta.get('index')
+        if cluster_index is None:
+            continue
+        member_indices = np.where(cluster_labels == cluster_index)[0]
+        if member_indices.size == 0:
+            continue
+
+        cluster_standards = [standards[i] for i in member_indices]
+        cluster_embeddings = umap_embeddings[member_indices]
+
+        center_x = float(np.mean(cluster_embeddings[:, 0]))
+        center_y = float(np.mean(cluster_embeddings[:, 1]))
+        cluster_center = {'x': center_x, 'y': center_y}
+
+        if viz_mode == '3d' and cluster_embeddings.shape[1] >= 3:
+            center_z = float(np.mean(cluster_embeddings[:, 2]))
+            cluster_center['z'] = center_z
+            distances_3d = np.sqrt(
+                (cluster_embeddings[:, 0] - center_x) ** 2 +
+                (cluster_embeddings[:, 1] - center_y) ** 2 +
+                (cluster_embeddings[:, 2] - center_z) ** 2
+            )
+            cluster_radius = float(np.max(distances_3d)) * 1.2 if len(distances_3d) else 0.0
+            radius_3d = cluster_radius
+        else:
+            distances = np.sqrt(
+                (cluster_embeddings[:, 0] - center_x) ** 2 +
+                (cluster_embeddings[:, 1] - center_y) ** 2
+            )
+            cluster_radius = float(np.max(distances)) * 1.2 if len(distances) else 0.0
+            radius_3d = None
+
+        state_counts = Counter(
+            standard.state.code for standard in cluster_standards if standard.state
+        )
+
+        standards_details = []
+        for standard in cluster_standards:
+            grade_levels = list(standard.grade_levels.values_list('grade_numeric', flat=True))
+            display_title = standard.title or standard.description or f"Standard {str(standard.id)[:8]}"
+            display_description = standard.description or "No description available"
+            if len(display_description) > 200:
+                display_description = display_description[:200] + '...'
+
+            standards_details.append({
+                'id': str(standard.id),
+                'title': display_title,
+                'description': display_description,
+                'state': standard.state.code if standard.state else 'Unknown',
+                'state_name': standard.state.name if standard.state else 'Unknown',
+                'subject_area': standard.subject_area.name if standard.subject_area else 'Unknown',
+                'grade_levels': sorted(grade_levels) if grade_levels else [],
+                'domain': getattr(standard, 'domain', ''),
+                'cluster_id': meta['id']
+            })
+
+        clusters.append({
+            'id': cluster_index,
+            'manual_cluster_id': meta['id'],
+            'name': meta['name'],
+            'color': meta['color'],
+            'center': cluster_center,
+            'radius': cluster_radius,
+            'radius_3d': radius_3d,
+            'states': list(state_counts.keys()),
+            'state_distribution': dict(state_counts),
+            'key_topics': _extract_key_topics(cluster_standards),
+            'size': len(cluster_standards),
+            'standards_count': len(cluster_standards),
+            'standards': standards_details,
+            'source': 'manual'
+        })
+
+    clusters.sort(key=lambda x: x['standards_count'], reverse=True)
     return clusters
 
 
@@ -2157,6 +2814,7 @@ def embeddings_cluster_matrix_api(request):
     view = EmbeddingsAPIView()
     
     try:
+        standard_ids = view.parse_standard_ids(request)
         # Validate parameters (same as visualization endpoint for consistency)
         grade_level = request.GET.get('grade_level')
         if grade_level and grade_level.strip():
@@ -2174,26 +2832,152 @@ def embeddings_cluster_matrix_api(request):
         )
         
         # Create cache key
-        cache_key = f"topic_coverage_matrix_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
-        
+        manual_cluster_labels = view.parse_cluster_labels(request)
+
+        cache_key = None
+        if not standard_ids and not manual_cluster_labels:
+            cache_key = f"topic_coverage_matrix_{grade_level}_{subject_area_id}_{cluster_size}_{epsilon}"
+
         def calculate_cluster_matrix():
-            # Get the same clustering data as the scatter plot
-            # This ensures consistency between visualizations
-            standards_query = Standard.objects.filter(
-                embedding__isnull=False
-            ).select_related('state', 'subject_area')
-            
-            if grade_level is not None:
-                standards_query = standards_query.filter(
-                    grade_levels__grade_numeric=grade_level
-                ).distinct()
-            
-            if subject_area_id:
-                standards_query = standards_query.filter(subject_area_id=subject_area_id)
-            
-            standards = list(standards_query[:2000])
-            
-            if len(standards) < 10:
+            manual_labels = manual_cluster_labels or {}
+            if standard_ids:
+                standards_query = Standard.objects.filter(
+                    id__in=standard_ids,
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area').prefetch_related('grade_levels')
+                standards = list(standards_query)
+                order_map = {sid: idx for idx, sid in enumerate(standard_ids)}
+                standards.sort(key=lambda s: order_map.get(str(s.id), 0))
+
+                if not standards:
+                    return {
+                        'topic_names': [],
+                        'state_codes': [],
+                        'coverage_matrix': [],
+                        'error': 'No standards found for coverage analysis'
+                    }
+
+                if manual_labels:
+                    cluster_objects = TopicCluster.objects.filter(id__in=manual_labels.keys())
+                    cluster_name_map = {str(cluster.id): cluster.name for cluster in cluster_objects}
+
+                    standards_by_id = {str(std.id): std for std in standards}
+                    state_codes_set = set()
+                    topic_names = []
+                    topic_metadata = []
+                    coverage_rows = []
+
+                    for index, (cluster_id, member_ids) in enumerate(manual_labels.items()):
+                        cluster_standards = [standards_by_id[sid] for sid in member_ids if sid in standards_by_id]
+                        if not cluster_standards:
+                            continue
+
+                        state_counts = Counter(
+                            std.state.code if std.state else 'Unknown'
+                            for std in cluster_standards
+                        )
+                        state_codes_set.update(state_counts.keys())
+                        max_count = max(state_counts.values()) if state_counts else 1
+
+                        cluster_name = cluster_name_map.get(cluster_id, f'Cluster {index + 1}')
+                        topic_names.append(cluster_name)
+                        topic_metadata.append({
+                            'cluster_id': cluster_id,
+                            'name': cluster_name,
+                            'total_standards': len(cluster_standards),
+                            'states_covered': len(state_counts),
+                            'sample_standards': [
+                                (std.title or std.description or '')[:80]
+                                for std in cluster_standards[:5]
+                            ]
+                        })
+                        coverage_rows.append((state_counts, max_count))
+
+                    assigned_ids = {sid for ids in manual_labels.values() for sid in ids}
+                    unassigned = [std for std in standards if str(std.id) not in assigned_ids]
+                    if unassigned:
+                        state_counts = Counter(
+                            std.state.code if std.state else 'Unknown'
+                            for std in unassigned
+                        )
+                        state_codes_set.update(state_counts.keys())
+                        max_count = max(state_counts.values()) if state_counts else 1
+                        topic_names.append('Unassigned Standards')
+                        topic_metadata.append({
+                            'cluster_id': 'unassigned',
+                            'name': 'Unassigned Standards',
+                            'total_standards': len(unassigned),
+                            'states_covered': len(state_counts),
+                            'sample_standards': [
+                                (std.title or std.description or '')[:80]
+                                for std in unassigned[:5]
+                            ]
+                        })
+                        coverage_rows.append((state_counts, max_count))
+
+                    state_codes = sorted(state_codes_set)
+                    coverage_matrix = []
+                    for state_counts, max_count in coverage_rows:
+                        coverage_matrix.append([
+                            round(state_counts.get(code, 0) / max_count if max_count else 0, 3)
+                            for code in state_codes
+                        ])
+
+                    return {
+                        'topic_names': topic_names,
+                        'state_codes': state_codes,
+                        'coverage_matrix': coverage_matrix,
+                        'topic_metadata': topic_metadata,
+                        'total_topics': len(topic_names),
+                        'total_states': len(state_codes),
+                        'total_standards': len(standards)
+                    }
+
+                # Build simple state coverage matrix for selected standards
+                state_counts = {}
+                for standard in standards:
+                    state_code = standard.state.code if standard.state else 'Unknown'
+                    state_counts.setdefault(state_code, 0)
+                    state_counts[state_code] += 1
+
+                state_codes = sorted(state_counts.keys())
+                max_count = max(state_counts.values()) if state_counts else 1
+                coverage_row = [round(state_counts.get(code, 0) / max_count if max_count else 0, 3) for code in state_codes]
+
+                return {
+                    'topic_names': ['Selected Standards'],
+                    'state_codes': state_codes,
+                    'coverage_matrix': [coverage_row],
+                    'topic_metadata': [{
+                        'cluster_id': 0,
+                        'name': 'Selected Standards',
+                        'total_standards': len(standards),
+                        'states_covered': len(state_codes),
+                        'sample_standards': [
+                            f"{standard.state.code if standard.state else 'Unknown'}: {(standard.title or standard.description or '')[:80]}"
+                            for standard in standards[:5]
+                        ]
+                    }],
+                    'total_topics': 1,
+                    'total_states': len(state_codes),
+                    'total_standards': len(standards)
+                }
+            else:
+                standards_query = Standard.objects.filter(
+                    embedding__isnull=False
+                ).select_related('state', 'subject_area')
+
+                if grade_level is not None:
+                    standards_query = standards_query.filter(
+                        grade_levels__grade_numeric=grade_level
+                    ).distinct()
+
+                if subject_area_id:
+                    standards_query = standards_query.filter(subject_area_id=subject_area_id)
+
+                standards = list(standards_query[:2000])
+
+            if not standards:
                 return {
                     'topic_names': [],
                     'state_codes': [],
@@ -2229,6 +3013,106 @@ def embeddings_cluster_matrix_api(request):
             
             embeddings_matrix = np.array(embeddings_matrix)
             logger.info(f"Calculating topic coverage matrix for {len(embeddings_matrix)} embeddings")
+
+            if manual_labels:
+                cluster_objects = TopicCluster.objects.filter(id__in=manual_labels.keys())
+                cluster_name_map = {str(cluster.id): cluster.name for cluster in cluster_objects}
+
+                standards_by_id = {str(std.id): std for std in valid_standards}
+                total_state_counts = Counter(
+                    std.state.code if std.state else 'Unknown'
+                    for std in valid_standards
+                )
+                state_codes = sorted(total_state_counts.keys())
+
+                topic_names = []
+                topic_metadata = []
+                coverage_rows = []
+
+                for index, (cluster_id, member_ids) in enumerate(manual_labels.items()):
+                    cluster_standards = [standards_by_id[sid] for sid in member_ids if sid in standards_by_id]
+                    if not cluster_standards:
+                        continue
+
+                    state_counts = Counter(
+                        std.state.code if std.state else 'Unknown'
+                        for std in cluster_standards
+                    )
+
+                    cluster_name = cluster_name_map.get(cluster_id, f'Cluster {index + 1}')
+                    topic_names.append(cluster_name)
+                    topic_metadata.append({
+                        'cluster_id': cluster_id,
+                        'name': cluster_name,
+                        'total_standards': len(cluster_standards),
+                        'states_covered': len([code for code in state_counts if total_state_counts.get(code, 0)]),
+                        'state_breakdown': {
+                            code: {
+                                'assigned': state_counts.get(code, 0),
+                                'total': total_state_counts.get(code, 0)
+                            }
+                            for code in state_codes if total_state_counts.get(code, 0)
+                        },
+                        'sample_standards': [
+                            (std.title or std.description or '')[:80]
+                            for std in cluster_standards[:5]
+                        ]
+                    })
+                    coverage_rows.append(state_counts)
+
+                assigned_ids = {sid for ids in manual_labels.values() for sid in ids}
+                unassigned = [std for std in valid_standards if str(std.id) not in assigned_ids]
+                if unassigned:
+                    state_counts = Counter(
+                        std.state.code if std.state else 'Unknown'
+                        for std in unassigned
+                    )
+                    topic_names.append('Unassigned Standards')
+                    topic_metadata.append({
+                        'cluster_id': 'unassigned',
+                        'name': 'Unassigned Standards',
+                        'total_standards': len(unassigned),
+                        'states_covered': len([code for code in state_counts if total_state_counts.get(code, 0)]),
+                        'state_breakdown': {
+                            code: {
+                                'assigned': state_counts.get(code, 0),
+                                'total': total_state_counts.get(code, 0)
+                            }
+                            for code in state_codes if total_state_counts.get(code, 0)
+                        },
+                        'sample_standards': [
+                            (std.title or std.description or '')[:80]
+                            for std in unassigned[:5]
+                        ]
+                    })
+                    coverage_rows.append(state_counts)
+
+                if not state_codes:
+                    state_codes = ['Unknown']
+                    total_state_counts['Unknown'] = len(valid_standards)
+
+                coverage_matrix = []
+                for state_counts in coverage_rows:
+                    row = []
+                    for code in state_codes:
+                        total_for_state = total_state_counts.get(code, 0)
+                        if total_for_state <= 0:
+                            row.append(0.0)
+                        else:
+                            row.append(round(state_counts.get(code, 0) / total_for_state, 3))
+                    coverage_matrix.append(row)
+
+                return {
+                    'topic_names': topic_names,
+                    'state_codes': state_codes,
+                    'coverage_matrix': coverage_matrix,
+                    'topic_metadata': topic_metadata,
+                    'total_topics': len(topic_names),
+                    'total_states': len(state_codes),
+                    'total_standards': len(valid_standards)
+                }
+
+            threading_layer = ensure_numba_threading_layer()
             
             # Perform same UMAP + HDBSCAN as visualization
             try:
@@ -2243,15 +3127,26 @@ def embeddings_cluster_matrix_api(request):
                     adaptive_min_dist = 0.05
                 else:
                     adaptive_min_dist = 0.1
-                
-                umap_reducer = umap.UMAP(
-                    n_components=2,
-                    n_neighbors=adaptive_n_neighbors,
-                    min_dist=adaptive_min_dist,
-                    metric='cosine',
-                    random_state=42
-                )
-                umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
+
+                if threading_layer == 'disabled':
+                    logger.warning("Numba threading unavailable; using direct embedding projection for topic coverage matrix")
+                    if embeddings_matrix.shape[1] >= 2:
+                        umap_embeddings = embeddings_matrix[:, :2]
+                    else:
+                        umap_embeddings = np.pad(
+                            embeddings_matrix,
+                            ((0, 0), (0, max(0, 2 - embeddings_matrix.shape[1]))),
+                            mode='constant'
+                        )
+                else:
+                    umap_reducer = umap.UMAP(
+                        n_components=2,
+                        n_neighbors=adaptive_n_neighbors,
+                        min_dist=adaptive_min_dist,
+                        metric='cosine',
+                        random_state=42
+                    )
+                    umap_embeddings = umap_reducer.fit_transform(embeddings_matrix)
                 
                 # Phase 1: HDBSCAN with min_samples
                 min_cluster_size = max(2, cluster_size)
@@ -2264,115 +3159,193 @@ def embeddings_cluster_matrix_api(request):
                     cluster_selection_epsilon=epsilon
                 )
                 cluster_labels = clusterer.fit_predict(umap_embeddings)
-                
-                # Get unique cluster IDs (excluding noise -1)
+
                 unique_clusters = [c for c in set(cluster_labels) if c != -1]
                 unique_clusters.sort()
-                
+
                 if len(unique_clusters) < 2:
-                    return {
-                        'topic_names': [],
-                        'state_codes': [],
-                        'coverage_matrix': [],
-                        'error': f'Only {len(unique_clusters)} topics found - need at least 2 for coverage analysis'
-                    }
-                
-                logger.info(f"Found {len(unique_clusters)} topic clusters for coverage matrix")
-                
-                # Group standards by cluster and state
-                cluster_info = {}
-                states_in_data = set()
-                
-                for cluster_id in unique_clusters:
-                    cluster_mask = cluster_labels == cluster_id
-                    cluster_standards = [valid_standards[i] for i in range(len(valid_standards)) if cluster_mask[i]]
-                    
-                    # Generate cluster name using existing theme extraction
-                    cluster_name = _extract_cluster_theme(cluster_standards, cluster_id)
-                    cluster_info[cluster_id] = {
-                        'name': cluster_name,
-                        'standards_by_state': {},
-                        'total_standards': len(cluster_standards)
-                    }
-                    
-                    # Group standards by state
-                    for standard in cluster_standards:
-                        state_code = standard.state.code
-                        states_in_data.add(state_code)
-                        
-                        if state_code not in cluster_info[cluster_id]['standards_by_state']:
-                            cluster_info[cluster_id]['standards_by_state'][state_code] = []
-                        cluster_info[cluster_id]['standards_by_state'][state_code].append(standard)
-                
-                # Sort states for consistent ordering
-                state_codes = sorted(list(states_in_data))
-                
-                # Calculate coverage matrix: Topics (rows) × States (columns)
-                coverage_matrix = []
-                topic_names = []
-                topic_metadata = []
-                
-                for cluster_id in unique_clusters:
-                    info = cluster_info[cluster_id]
-                    topic_names.append(info['name'])
-                    
-                    # Calculate coverage for each state
-                    coverage_row = []
-                    max_coverage = max([len(info['standards_by_state'].get(state, [])) for state in state_codes] + [1])
-                    
-                    for state_code in state_codes:
-                        state_standards = info['standards_by_state'].get(state_code, [])
-                        # Normalize coverage as percentage of maximum coverage for this topic
-                        coverage = len(state_standards) / max_coverage if max_coverage > 0 else 0
-                        coverage_row.append(round(coverage, 3))
-                    
-                    coverage_matrix.append(coverage_row)
-                    
-                    # Create metadata for tooltips
-                    sample_standards = []
-                    for state in state_codes[:3]:  # Sample from first few states
-                        state_standards = info['standards_by_state'].get(state, [])
-                        if state_standards:
-                            sample_standards.extend([
-                                f"{state}: {(s.title or s.description or f'Standard {str(s.id)[:8]}')[:50]}..."
-                                for s in state_standards[:2]
-                            ])
-                    
-                    topic_metadata.append({
-                        'cluster_id': int(cluster_id),
-                        'name': info['name'],
-                        'total_standards': int(info['total_standards']),
-                        'states_covered': int(len([s for s in state_codes if info['standards_by_state'].get(s)])),
-                        'sample_standards': sample_standards[:5]  # Limit samples
-                    })
-                
-                return {
-                    'topic_names': topic_names,
-                    'state_codes': state_codes,
-                    'coverage_matrix': coverage_matrix,
-                    'topic_metadata': topic_metadata,
-                    'total_topics': int(len(unique_clusters)),
-                    'total_states': int(len(state_codes)),
-                    'total_standards': int(len(valid_standards))
-                }
-                
+                    raise ValueError('Insufficient clusters from HDBSCAN')
+
             except Exception as e:
                 logger.error(f"Topic coverage matrix calculation failed: {e}")
+
+                # Try KMeans fallback before subject-area summary
+                try:
+                    fallback_labels = _fallback_kmeans_clustering(
+                        embeddings_matrix,
+                        len(valid_standards),
+                        max(cluster_size, 3),
+                        logger
+                    )
+                    cluster_labels = np.asarray(fallback_labels)
+                    unique_clusters = [c for c in sorted(set(cluster_labels.tolist())) if c != -1]
+                    if not unique_clusters:
+                        raise ValueError('KMeans fallback produced no clusters')
+                except Exception as clustering_error:
+                    logger.error(f"KMeans fallback failed: {clustering_error}")
+
+                    # Subject-area coverage as last resort
+                    try:
+                        coverage_summary: Dict[str, Dict[str, int]] = {}
+                        state_codes = set()
+                        for standard in valid_standards:
+                            state_code = standard.state.code if standard.state else 'Unknown'
+                            state_codes.add(state_code)
+                            subject_key = standard.subject_area.name if standard.subject_area else 'General'
+                            coverage_summary.setdefault(subject_key, {})
+                            coverage_summary[subject_key][state_code] = coverage_summary[subject_key].get(state_code, 0) + 1
+
+                        state_codes = sorted(state_codes)
+                        if not coverage_summary:
+                            raise ValueError('No coverage summary available')
+
+                        topic_names = []
+                        coverage_matrix = []
+                        topic_metadata = []
+                        for subject, counts in coverage_summary.items():
+                            topic_names.append(subject)
+                            max_count = max(counts.values()) if counts else 1
+                            row = [round(counts.get(code, 0) / max_count if max_count else 0, 3) for code in state_codes]
+                            coverage_matrix.append(row)
+                            topic_metadata.append({
+                                'cluster_id': subject,
+                                'name': subject,
+                                'total_standards': int(sum(counts.values())),
+                                'states_covered': int(len(counts)),
+                                'sample_standards': []
+                            })
+
+                        return {
+                            'topic_names': topic_names,
+                            'state_codes': state_codes,
+                            'coverage_matrix': coverage_matrix,
+                            'topic_metadata': topic_metadata,
+                            'total_topics': len(topic_names),
+                            'total_states': len(state_codes),
+                            'total_standards': len(valid_standards),
+                            'warning': f'Topic clustering failed ({str(e)}); using subject-area coverage instead'
+                        }
+                    except Exception as fallback_error:
+                        logger.error(f"Fallback coverage summary failed: {fallback_error}")
+                        total_by_state = Counter(
+                            standard.state.code if standard.state else 'Unknown'
+                            for standard in valid_standards
+                        )
+                        state_codes = sorted(total_by_state.keys()) or ['Unknown']
+                        coverage_matrix = [[1.0 for _ in state_codes]]
+                        return {
+                            'topic_names': ['All Standards'],
+                            'state_codes': state_codes,
+                            'coverage_matrix': coverage_matrix,
+                            'topic_metadata': [{
+                                'cluster_id': 'all',
+                                'name': 'All Standards',
+                                'total_standards': len(valid_standards),
+                                'states_covered': len(state_codes),
+                                'state_breakdown': {
+                                    code: {
+                                        'assigned': total_by_state.get(code, 0),
+                                        'total': total_by_state.get(code, 0)
+                                    }
+                                    for code in state_codes
+                                },
+                                'sample_standards': []
+                            }],
+                            'total_topics': 1,
+                            'total_states': len(state_codes),
+                            'total_standards': len(valid_standards),
+                            'warning': f'Topic clustering failed ({str(e)}); reverting to aggregate coverage summary'
+                        }
+
+            # Build coverage from cluster labels (HDBSCAN or fallback)
+            total_state_counts = Counter(
+                std.state.code if std.state else 'Unknown'
+                for std in valid_standards
+            )
+            state_codes = sorted(total_state_counts.keys()) or ['Unknown']
+            if state_codes == ['Unknown']:
+                total_state_counts['Unknown'] = len(valid_standards)
+
+            cluster_info = {}
+            for cluster_id in unique_clusters:
+                cluster_mask = cluster_labels == cluster_id
+                cluster_standards = [valid_standards[i] for i in range(len(valid_standards)) if cluster_mask[i]]
+                if not cluster_standards:
+                    continue
+
+                cluster_name = _extract_cluster_theme(cluster_standards, cluster_id)
+                counts = Counter(
+                    std.state.code if std.state else 'Unknown'
+                    for std in cluster_standards
+                )
+
+                cluster_info[int(cluster_id)] = {
+                    'name': cluster_name,
+                    'counts': counts,
+                    'standards': cluster_standards
+                }
+
+            if not cluster_info:
                 return {
                     'topic_names': [],
-                    'state_codes': [],
+                    'state_codes': state_codes,
                     'coverage_matrix': [],
-                    'error': f'Topic clustering failed: {str(e)}'
+                    'error': 'No clusters available for coverage analysis'
                 }
+
+            topic_names = []
+            coverage_matrix = []
+            topic_metadata = []
+
+            for cluster_id, info in cluster_info.items():
+                topic_names.append(info['name'])
+                counts = info['counts']
+                row = []
+                state_breakdown = {}
+                for code in state_codes:
+                    total_for_state = total_state_counts.get(code, 0)
+                    assigned = counts.get(code, 0)
+                    state_breakdown[code] = {
+                        'assigned': assigned,
+                        'total': total_for_state
+                    }
+                    row.append(round(assigned / total_for_state, 3) if total_for_state else 0.0)
+                coverage_matrix.append(row)
+                topic_metadata.append({
+                    'cluster_id': cluster_id,
+                    'name': info['name'],
+                    'total_standards': len(info['standards']),
+                    'states_covered': len([code for code in state_codes if counts.get(code, 0)]),
+                    'state_breakdown': state_breakdown,
+                    'sample_standards': [
+                        (std.title or std.description or '')[:80]
+                        for std in info['standards'][:5]
+                    ]
+                })
+
+            return {
+                'topic_names': topic_names,
+                'state_codes': state_codes,
+                'coverage_matrix': coverage_matrix,
+                'topic_metadata': topic_metadata,
+                'total_topics': len(topic_names),
+                'total_states': len(state_codes),
+                'total_standards': len(valid_standards)
+            }
+
         
-        matrix_data = view.get_cached_or_calculate(cache_key, calculate_cluster_matrix)
-        
+        if cache_key:
+            matrix_data = view.get_cached_or_calculate(cache_key, calculate_cluster_matrix)
+        else:
+            matrix_data = calculate_cluster_matrix()
+
         # Add parameters to response
         matrix_data['parameters'] = {
             'grade_level': grade_level,
             'subject_area': subject_area_id,
             'cluster_size': cluster_size,
-            'epsilon': epsilon
+            'epsilon': epsilon,
+            'standard_ids': standard_ids
         }
         
         return view.success_response(matrix_data)
@@ -2404,23 +3377,29 @@ def embeddings_enhanced_similarity_matrix_api(request):
         matrix_type = request.GET.get('matrix_type', 'state')  # 'state', 'topic', 'density'
         
         # Create cache key
-        cache_key = f"enhanced_matrix_{matrix_type}_{grade_level}_{subject_area_id}"
-        
+        cache_key = None
+        if not standard_ids:
+            cache_key = f"enhanced_matrix_{matrix_type}_{grade_level}_{subject_area_id}"
+
         def calculate_enhanced_matrix():
             if matrix_type == 'topic':
-                return _calculate_topic_coverage_matrix(grade_level, subject_area_id)
+                return _calculate_topic_coverage_matrix(grade_level, subject_area_id, standard_ids)
             elif matrix_type == 'density':
                 return _calculate_density_matrix(grade_level, subject_area_id)
             else:  # Default to enhanced state matrix
-                return _calculate_enhanced_state_matrix(grade_level, subject_area_id)
-        
-        matrix_data = view.get_cached_or_calculate(cache_key, calculate_enhanced_matrix)
-        
+                return _calculate_enhanced_state_matrix(grade_level, subject_area_id, standard_ids)
+
+        if cache_key:
+            matrix_data = view.get_cached_or_calculate(cache_key, calculate_enhanced_matrix)
+        else:
+            matrix_data = calculate_enhanced_matrix()
+
         # Add parameters to response
         matrix_data['parameters'] = {
             'grade_level': grade_level,
             'subject_area': subject_area_id,
-            'matrix_type': matrix_type
+            'matrix_type': matrix_type,
+            'standard_ids': standard_ids
         }
         
         return view.success_response(matrix_data)
@@ -2431,9 +3410,49 @@ def embeddings_enhanced_similarity_matrix_api(request):
         return view.handle_exception(request, e)
 
 
-def _calculate_topic_coverage_matrix(grade_level: int = None, subject_area_id: int = None) -> Dict:
+def _calculate_topic_coverage_matrix(grade_level: int = None, subject_area_id: int = None, standard_ids: Optional[List[str]] = None) -> Dict:
     """Calculate topic/theme coverage across states matrix"""
-    
+    if standard_ids:
+        standards = list(Standard.objects.filter(
+            id__in=standard_ids,
+            embedding__isnull=False,
+            state__isnull=False
+        ).select_related('state'))
+
+        if grade_level is not None:
+            standards = [s for s in standards if s.grade_levels.filter(grade_numeric=grade_level).exists()]
+        if subject_area_id:
+            standards = [s for s in standards if s.subject_area_id == subject_area_id]
+
+        state_counts = {}
+        for std in standards:
+            state_counts.setdefault(std.state.code, 0)
+            state_counts[std.state.code] += 1
+
+        state_codes = sorted(state_counts.keys())
+        if not state_codes:
+            return {
+                'row_labels': [],
+                'col_labels': [],
+                'matrix': [],
+                'matrix_type': 'topic_coverage',
+                'total_themes': 0,
+                'total_states': 0,
+                'error': 'No state coverage available for the selected standards'
+            }
+
+        max_count = max(state_counts.values()) if state_counts else 1
+        matrix = [[round(state_counts.get(code, 0) / max_count if max_count else 0, 3) for code in state_codes]]
+
+        return {
+            'row_labels': ['Selected Standards'],
+            'col_labels': state_codes,
+            'matrix': matrix,
+            'matrix_type': 'topic_coverage',
+            'total_themes': 1,
+            'total_states': len(state_codes)
+        }
+
     # Get topic clusters
     themes_query = TopicCluster.objects.all()
     if subject_area_id:
@@ -2514,26 +3533,60 @@ def _calculate_density_matrix(grade_level: int = None, subject_area_id: int = No
     }
 
 
-def _calculate_enhanced_state_matrix(grade_level: int = None, subject_area_id: int = None) -> Dict:
+def _calculate_enhanced_state_matrix(grade_level: int = None, subject_area_id: int = None, standard_ids: Optional[List[str]] = None) -> Dict:
     """Calculate enhanced state similarity matrix with better data"""
     
+    if standard_ids:
+        standards = list(Standard.objects.filter(
+            id__in=standard_ids,
+            embedding__isnull=False,
+            state__isnull=False
+        ).select_related('state').prefetch_related('grade_levels'))
+
+        if grade_level is not None:
+            standards = [s for s in standards if s.grade_levels.filter(grade_numeric=grade_level).exists()]
+        if subject_area_id:
+            standards = [s for s in standards if s.subject_area_id == subject_area_id]
+
+        state_vectors = {}
+        for std in standards:
+            try:
+                vec = np.array(std.embedding, dtype=np.float32)
+            except (ValueError, TypeError):
+                continue
+            state_vectors.setdefault(std.state.code, []).append(vec)
+
+        state_codes = sorted(state_vectors.keys())
+        if len(state_codes) < 2:
+            return {
+                'row_labels': state_codes,
+                'col_labels': state_codes,
+                'matrix': [[1.0] if state_codes else []],
+                'matrix_type': 'enhanced_state',
+                'total_states': len(state_codes),
+                'error': 'At least two states required for similarity comparison'
+            }
+
+        state_centroids = {code: np.mean(np.stack(vectors), axis=0) for code, vectors in state_vectors.items() if vectors}
+        return _build_state_similarity_matrix(state_centroids)
+
     # Use embedding-based similarities instead of just correlations
     states_query = State.objects.filter(
         standards__embedding__isnull=False
     ).distinct()
-    
+
     if grade_level is not None:
         states_query = states_query.filter(
             standards__grade_levels__grade_numeric=grade_level
         )
-    
+
     if subject_area_id:
         states_query = states_query.filter(
             standards__subject_area_id=subject_area_id
         )
-    
+
     states = list(states_query.order_by('code'))
-    
+
     if len(states) < 2:
         return {
             'row_labels': [],
@@ -2541,76 +3594,84 @@ def _calculate_enhanced_state_matrix(grade_level: int = None, subject_area_id: i
             'matrix': [],
             'error': 'Need at least 2 states for similarity matrix'
         }
-    
-    # Calculate state centroids from embeddings
+
     state_centroids = {}
-    
+
     for state in states:
         standards_query = Standard.objects.filter(
             state=state,
             embedding__isnull=False
         )
-        
+
         if grade_level is not None:
             standards_query = standards_query.filter(
                 grade_levels__grade_numeric=grade_level
             ).distinct()
-        
+
         if subject_area_id:
             standards_query = standards_query.filter(subject_area_id=subject_area_id)
-        
+
         standards = list(standards_query[:500])  # Limit for performance
-        
+
         if standards:
-            # Calculate average embedding (centroid)
             embeddings = []
             for standard in standards:
                 try:
-                    if isinstance(standard.embedding, list):
-                        embeddings.append(np.array(standard.embedding, dtype=np.float32))
-                    else:
-                        embeddings.append(np.array(standard.embedding, dtype=np.float32))
-                except:
+                    embeddings.append(np.array(standard.embedding, dtype=np.float32))
+                except Exception:
                     continue
-            
+
             if embeddings:
                 centroid = np.mean(embeddings, axis=0)
                 state_centroids[state.code] = centroid
-    
-    # Calculate similarity matrix using centroids
-    state_codes = [state.code for state in states if state.code in state_centroids]
-    n_states = len(state_codes)
-    
-    if n_states < 2:
+
+    state_codes = [code for code in [state.code for state in states] if code in state_centroids]
+    if len(state_codes) < 2:
         return {
             'row_labels': [],
             'col_labels': [],
             'matrix': [],
             'error': 'Insufficient embedding data for similarity calculation'
         }
-    
-    similarity_matrix = []
-    
+
+    return _build_state_similarity_matrix(state_centroids)
+
+
+def _build_state_similarity_matrix(state_centroids: Dict[str, np.ndarray]) -> Dict:
+    state_codes = sorted(state_centroids.keys())
+    if len(state_codes) < 2:
+        return {
+            'row_labels': state_codes,
+            'col_labels': state_codes,
+            'matrix': [[1.0] if state_codes else []],
+            'matrix_type': 'enhanced_state',
+            'total_states': len(state_codes)
+        }
+
     from sklearn.metrics.pairwise import cosine_similarity
-    
-    for i, state1 in enumerate(state_codes):
+
+    similarity_matrix = []
+    for code1 in state_codes:
         row = []
-        for j, state2 in enumerate(state_codes):
-            if i == j:
+        vec1 = state_centroids[code1].reshape(1, -1)
+        norm1 = np.linalg.norm(vec1)
+        for code2 in state_codes:
+            if code1 == code2:
                 similarity = 1.0
             else:
-                # Calculate cosine similarity between state centroids
-                centroid1 = state_centroids[state1].reshape(1, -1)
-                centroid2 = state_centroids[state2].reshape(1, -1)
-                similarity = float(cosine_similarity(centroid1, centroid2)[0][0])
-            
+                vec2 = state_centroids[code2].reshape(1, -1)
+                norm2 = np.linalg.norm(vec2)
+                if norm1 == 0 or norm2 == 0:
+                    similarity = 0.0
+                else:
+                    similarity = float(cosine_similarity(vec1, vec2)[0][0])
             row.append(round(similarity, 3))
         similarity_matrix.append(row)
-    
+
     return {
         'row_labels': state_codes,
         'col_labels': state_codes,
         'matrix': similarity_matrix,
         'matrix_type': 'enhanced_state',
-        'total_states': int(len(state_codes))
+        'total_states': len(state_codes)
     }
