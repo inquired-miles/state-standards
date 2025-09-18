@@ -10,7 +10,7 @@ from .views import (
     
     # Proxy API views
     proxy_run_coverage_api, proxy_run_proxies_api, generate_proxies_api,
-    proxy_runs_list_api,
+    proxy_runs_list_api, proxy_coverage_reports_api,
     proxy_job_status_api, generate_standard_proxies_api, standard_proxy_job_status_api,
     proxy_detail_api,
     
@@ -54,6 +54,7 @@ urlpatterns = [
     path('api/proxy-run-coverage/', proxy_run_coverage_api, name='proxy_run_coverage_api'),
     path('api/proxy-run-proxies/', proxy_run_proxies_api, name='proxy_run_proxies_api'),
     path('api/proxy-runs/', proxy_runs_list_api, name='proxy_runs_list_api'),
+    path('api/proxy-coverage-reports/', proxy_coverage_reports_api, name='proxy_coverage_reports_api'),
     
     # Atom-level proxy endpoints
     path('api/generate-proxies/', generate_proxies_api, name='generate_proxies_api'),

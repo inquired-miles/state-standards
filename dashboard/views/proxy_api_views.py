@@ -5,23 +5,358 @@ import uuid
 import json
 import time
 import threading
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from django.http import JsonResponse
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError, PermissionDenied
 from django.db import transaction
+from django.db.models import Q, Count
 from django.core.cache import cache
 from django.utils import timezone
 import logging
 
 from standards.models import (
-    ProxyRun, ProxyStandard, Standard, StandardAtom, GradeLevel
+    ProxyRun, ProxyStandard, Standard, StandardAtom, GradeLevel, ClusterReport
 )
 from standards.services.clustering import ClusteringService, StandardClusteringService
 from standards.services.naming import ProxyNamingService
 from standards.services.proxy_run_analyzer import ProxyRunAnalyzer
+from standards.services.discovery import CustomClusterService
 from .base import BaseAPIView, api_endpoint
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_cluster_coverage(report_scope: Optional[Dict[str, Any]], covered_ids: Optional[Set[uuid.UUID]]) -> Optional[List[Dict[str, Any]]]:
+    """Return per-cluster coverage metrics for a scoped report."""
+    if not report_scope:
+        return None
+
+    covered_ids = covered_ids or set()
+    clusters_with_coverage: List[Dict[str, Any]] = []
+
+    for cluster in report_scope.get('clusters', []):
+        cluster_standard_ids = [sid for sid in cluster.get('standard_ids', []) if sid]
+        cluster_ids: Set[uuid.UUID] = set()
+        for sid in cluster_standard_ids:
+            try:
+                cluster_ids.add(uuid.UUID(str(sid)))
+            except (ValueError, TypeError, AttributeError):
+                continue
+        covered_in_cluster = cluster_ids & covered_ids
+        uncovered_in_cluster = cluster_ids - covered_ids
+        clusters_with_coverage.append({
+            'cluster_id': cluster.get('cluster_id'),
+            'cluster_name': cluster.get('cluster_name'),
+            'selection_order': cluster.get('selection_order'),
+            'notes': cluster.get('notes'),
+            'cluster_description': cluster.get('cluster_description'),
+            'states_breakdown': cluster.get('states_breakdown', {}),
+            'standards_count': cluster.get('standards_count', 0),
+            'covered_count': len(covered_in_cluster),
+            'not_covered_count': len(uncovered_in_cluster),
+            'standard_ids': cluster_standard_ids,
+            'covered_standard_ids': [str(sid) for sid in covered_in_cluster],
+            'not_covered_standard_ids': [str(sid) for sid in uncovered_in_cluster],
+        })
+
+    clusters_with_coverage.sort(key=lambda c: c.get('selection_order', 0))
+    return clusters_with_coverage
+
+
+def _build_report_metadata(report_scope: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not report_scope:
+        return None
+
+    updated_at = report_scope.get('updated_at')
+    return {
+        'id': report_scope.get('report_id'),
+        'title': report_scope.get('title'),
+        'description': report_scope.get('description'),
+        'is_shared': report_scope.get('is_shared'),
+        'total_clusters': report_scope.get('total_clusters', 0),
+        'standard_count': len(report_scope.get('standard_ids', []) or []),
+        'updated_at': updated_at.isoformat() if updated_at else None,
+    }
+
+
+def _build_run_state_coverage(
+    *,
+    proxies,
+    state_code: Optional[str],
+    grade_levels: Optional[List[int]],
+    scope_standard_ids: Optional[Set[uuid.UUID]],
+    subject_area_id: Optional[int],
+):
+    """Compute state coverage details for a proxy run."""
+
+    # Determine states to analyze
+    if state_code:
+        states = [state_code]
+    elif scope_standard_ids is not None:
+        scoped_qs = Standard.objects.filter(id__in=scope_standard_ids)
+        if subject_area_id is not None:
+            scoped_qs = scoped_qs.filter(subject_area_id=subject_area_id)
+        scoped_states = (
+            scoped_qs
+            .exclude(state__code__isnull=True)
+            .values_list('state__code', flat=True)
+            .distinct()
+        )
+        states = sorted(code for code in scoped_states if code)
+    else:
+        states_set = set()
+        for proxy in proxies:
+            if hasattr(proxy, 'member_atoms') and proxy.member_atoms.exists():
+                member_query = proxy.member_atoms.all()
+                if subject_area_id is not None:
+                    member_query = member_query.filter(standard__subject_area_id=subject_area_id)
+                member_states = member_query.values_list('standard__state__code', flat=True)
+                states_set.update(code for code in member_states if code)
+            elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
+                member_query = proxy.member_standards.all()
+                if subject_area_id is not None:
+                    member_query = member_query.filter(subject_area_id=subject_area_id)
+                member_states = member_query.values_list('state__code', flat=True)
+                states_set.update(code for code in member_states if code)
+        states = sorted(states_set)
+
+    std_to_proxy_titles: Dict[uuid.UUID, Set[str]] = {}
+    for proxy in proxies:
+        title = getattr(proxy, 'title', '') or getattr(proxy, 'proxy_id', str(proxy.id))
+
+        if hasattr(proxy, 'member_atoms') and proxy.member_atoms.exists():
+            member_query = proxy.member_atoms.all()
+            if state_code:
+                member_query = member_query.filter(standard__state__code=state_code)
+            if grade_levels:
+                member_query = member_query.filter(
+                    standard__grade_levels__grade_numeric__in=grade_levels
+                ).distinct()
+            if subject_area_id is not None:
+                member_query = member_query.filter(standard__subject_area_id=subject_area_id)
+            if scope_standard_ids is not None:
+                member_query = member_query.filter(standard_id__in=scope_standard_ids)
+
+            for sid in member_query.values_list('standard_id', flat=True):
+                std_to_proxy_titles.setdefault(sid, set()).add(title)
+
+        elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
+            member_query = proxy.member_standards.all()
+            if state_code:
+                member_query = member_query.filter(state__code=state_code)
+            if grade_levels:
+                member_query = member_query.filter(
+                    grade_levels__grade_numeric__in=grade_levels
+                ).distinct()
+            if subject_area_id is not None:
+                member_query = member_query.filter(subject_area_id=subject_area_id)
+            if scope_standard_ids is not None:
+                member_query = member_query.filter(id__in=scope_standard_ids)
+
+            for sid in member_query.values_list('id', flat=True):
+                std_to_proxy_titles.setdefault(sid, set()).add(title)
+
+    result = []
+    global_covered_ids: Set[uuid.UUID] = set()
+
+    for code in states:
+        state_standards_qs = Standard.objects.filter(state__code=code)
+        if scope_standard_ids is not None:
+            state_standards_qs = state_standards_qs.filter(id__in=scope_standard_ids)
+        if grade_levels:
+            state_standards_qs = state_standards_qs.filter(
+                grade_levels__grade_numeric__in=grade_levels
+            ).distinct()
+        if subject_area_id is not None:
+            state_standards_qs = state_standards_qs.filter(subject_area_id=subject_area_id)
+
+        all_ids = set(state_standards_qs.values_list('id', flat=True))
+
+        covered_ids: Set[uuid.UUID] = set()
+        for proxy in proxies:
+            if hasattr(proxy, 'member_atoms') and proxy.member_atoms.exists():
+                proxy_covered = set(
+                    proxy.member_atoms.filter(
+                        standard__state__code=code
+                    ).values_list('standard_id', flat=True)
+                )
+                if scope_standard_ids is not None:
+                    proxy_covered &= scope_standard_ids
+                covered_ids.update(proxy_covered)
+            elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
+                proxy_covered = set(
+                    proxy.member_standards.filter(
+                        state__code=code
+                    ).values_list('id', flat=True)
+                )
+                if scope_standard_ids is not None:
+                    proxy_covered &= scope_standard_ids
+                covered_ids.update(proxy_covered)
+
+        covered_ids = covered_ids & all_ids
+        not_covered_ids = all_ids - covered_ids
+        global_covered_ids.update(covered_ids)
+
+        covered_standards = [
+            {
+                'id': str(standard.id),
+                'code': standard.code,
+                'title': standard.title or '',
+                'description': standard.description or '',
+                'state__code': standard.state.code if standard.state else '',
+                'proxy_titles': sorted(list(std_to_proxy_titles.get(standard.id, []))),
+            }
+            for standard in Standard.objects.filter(id__in=covered_ids)
+        ]
+
+        not_covered_standards = [
+            {
+                'id': str(standard.id),
+                'code': standard.code,
+                'title': standard.title or '',
+                'description': standard.description or '',
+                'state__code': standard.state.code if standard.state else '',
+            }
+            for standard in Standard.objects.filter(id__in=not_covered_ids)
+        ]
+
+        coverage_percentage = (len(covered_ids) / len(all_ids) * 100) if all_ids else 0
+
+        result.append({
+            'state': code,
+            'covered_count': len(covered_ids),
+            'total_count': len(all_ids),
+            'coverage_percentage': round(coverage_percentage, 2),
+            'covered': covered_standards,
+            'not_covered': not_covered_standards,
+        })
+
+    result.sort(key=lambda x: x['state'])
+    return result, global_covered_ids
+
+
+def _load_report_scope(view: 'ProxyAPIView', request, report_id_param: Optional[str]):
+    if not report_id_param:
+        return None, None, None, None
+
+    try:
+        report_uuid = uuid.UUID(report_id_param)
+    except ValueError:
+        raise ValidationError('report_id must be a valid UUID')
+
+    try:
+        report = ClusterReport.objects.select_related('created_by').get(id=report_uuid)
+    except ClusterReport.DoesNotExist:
+        raise ValidationError('Coverage report not found')
+
+    user = request.user
+    can_view_report = (
+        report.created_by == user
+        or report.is_shared
+        or getattr(user, 'is_staff', False)
+        or getattr(user, 'is_superuser', False)
+    )
+    if not can_view_report:
+        raise PermissionDenied('You do not have access to this coverage report')
+
+    cluster_service = CustomClusterService()
+    report_scope = cluster_service.build_report_scope(report)
+    scope_standard_ids: Set[uuid.UUID] = set()
+    for sid in report_scope.get('standard_ids', []) or []:
+        try:
+            scope_standard_ids.add(uuid.UUID(str(sid)))
+        except (ValueError, TypeError, AttributeError):
+            continue
+
+    report_metadata = _build_report_metadata(report_scope)
+    if report_metadata is not None:
+        report_metadata['standard_count'] = len(scope_standard_ids)
+
+    return report_scope, scope_standard_ids, report_metadata, report
+
+
+def _build_report_cluster_items(
+    report_scope: Dict[str, Any],
+    *,
+    grade_levels: Optional[List[int]],
+    state_code: Optional[str],
+    subject_area_id: Optional[int],
+):
+    clusters = report_scope.get('clusters', []) or []
+
+    base_qs = Standard.objects.all()
+    if grade_levels:
+        base_qs = base_qs.filter(grade_levels__grade_numeric__in=grade_levels)
+    if state_code:
+        base_qs = base_qs.filter(state__code=state_code)
+    if subject_area_id is not None:
+        base_qs = base_qs.filter(subject_area_id=subject_area_id)
+    base_qs = base_qs.distinct()
+
+    base_rows = list(base_qs.values('id', 'code', 'title', 'description', 'state__code'))
+    base_entry_map: Dict[uuid.UUID, Dict[str, Any]] = {}
+    for row in base_rows:
+        std_id = row['id']
+        base_entry_map[std_id] = {
+            'id': str(std_id),
+            'code': row['code'],
+            'title': row['title'] or '',
+            'description': row['description'] or '',
+            'state__code': row['state__code'] or '',
+            'proxy_titles': [],
+        }
+
+    standards_in_scope = sorted(
+        base_entry_map.values(), key=lambda x: (x['state__code'], x['code'])
+    )
+
+    proxy_items: List[Dict[str, Any]] = []
+    covered_all_ids: Set[uuid.UUID] = set()
+
+    for cluster in clusters:
+        standard_ids = cluster.get('standard_ids', []) or []
+        cluster_qs = Standard.objects.filter(id__in=standard_ids)
+        if grade_levels:
+            cluster_qs = cluster_qs.filter(grade_levels__grade_numeric__in=grade_levels).distinct()
+        if state_code:
+            cluster_qs = cluster_qs.filter(state__code=state_code)
+        if subject_area_id is not None:
+            cluster_qs = cluster_qs.filter(subject_area_id=subject_area_id)
+
+        cluster_rows = list(
+            cluster_qs.values('id', 'code', 'title', 'description', 'state__code')
+        )
+
+        covered_entries = []
+        for row in cluster_rows:
+            std_id = row['id']
+            entry = base_entry_map.get(std_id)
+            if not entry:
+                continue
+            covered_entries.append(dict(entry))
+            covered_all_ids.add(std_id)
+
+        states_in_scope = len({item['state__code'] for item in covered_entries if item['state__code']})
+        coverage_count = len(cluster.get('states_breakdown', {}) or {})
+
+        proxy_items.append({
+            'proxy_id': cluster.get('cluster_id') or cluster.get('cluster_name'),
+            'title': cluster.get('cluster_name') or 'Cluster',
+            'description': cluster.get('cluster_description') or '',
+            'coverage_count': coverage_count,
+            'states_in_scope': states_in_scope,
+            'covered_count': len(covered_entries),
+            'covered': covered_entries,
+            'proxy_type': 'custom_cluster',
+        })
+
+    not_covered_ids = set(base_entry_map.keys()) - covered_all_ids
+    not_covered = sorted(
+        (dict(base_entry_map[sid]) for sid in not_covered_ids),
+        key=lambda x: (x['state__code'], x['code'])
+    )
+
+    return standards_in_scope, proxy_items, covered_all_ids, not_covered
 
 
 class ProxyAPIView(BaseAPIView):
@@ -151,181 +486,214 @@ def proxy_runs_list_api(request):
     except Exception as e:
         return view.handle_exception(request, e)
 
+
+@api_endpoint(['GET'])
+def proxy_coverage_reports_api(request):
+    """List coverage reports accessible to the current staff user."""
+    view = ProxyAPIView()
+    user = request.user
+
+    try:
+        include_shared = request.GET.get('include_shared', 'true').lower() == 'true'
+        queryset = ClusterReport.objects.select_related('created_by')
+        if include_shared:
+            queryset = queryset.filter(Q(created_by=user) | Q(is_shared=True))
+        else:
+            queryset = queryset.filter(created_by=user)
+
+        queryset = queryset.annotate(cluster_count=Count('clusterreportentry')).order_by('-updated_at')[:100]
+
+        reports = [
+            {
+                'id': str(report.id),
+                'title': report.title,
+                'description': report.description,
+                'updated_at': report.updated_at,
+                'is_shared': report.is_shared,
+                'cluster_count': report.cluster_count,
+            }
+            for report in queryset
+        ]
+
+        return view.success_response({'reports': reports})
+    except Exception as e:
+        return view.handle_exception(request, e)
+
 @api_endpoint(['GET'])
 def proxy_run_coverage_api(request):
-    """Return per-state coverage for a given run with validation and pagination"""
+    """Return per-state coverage for a proxy run or a saved coverage report."""
     view = ProxyAPIView()
-    
+
     try:
-        # Validate required parameters
-        run_id = view.validate_string(
-            request.GET.get('run_id'), 
-            min_length=1, 
-            max_length=100, 
-            field_name="run_id"
-        )
-        
-        # Optional parameters with validation
+        run_id_param = request.GET.get('run_id')
+        report_id_param = request.GET.get('report_id')
+
+        if not run_id_param and not report_id_param:
+            return view.validation_error_response('run_id or report_id is required')
+
+        run_id = None
+        if run_id_param:
+            run_id = view.validate_string(run_id_param, min_length=1, max_length=100, field_name='run_id')
+
         state_code = request.GET.get('state')
         if state_code:
             state_code = view.validate_string(state_code, max_length=2, field_name="state").upper()
-        
-        # Parse grade levels
+
         grades_param = request.GET.get('grades')
-        grade_levels = None
+        grade_levels: Optional[List[int]] = None
         if grades_param:
             grade_levels = view.validate_list_of_integers(grades_param, field_name="grades")
             grade_levels = view.validate_grade_levels(grade_levels)
-        
-        # Get proxy run with proper error handling
+
+        subject_area_id_param = request.GET.get('subject_area_id')
+        subject_area_id = int(subject_area_id_param) if subject_area_id_param else None
+
         try:
-            run = ProxyRun.objects.get(run_id=run_id, status='completed')
-        except ProxyRun.DoesNotExist:
-            return view.error_response('Run not found', status=404)
-        
-        # Get associated proxies
-        proxies = run.get_associated_proxies()
-        
-        # Apply grade level filtering
-        if grade_levels:
-            if run.run_type == 'atoms':
-                proxies = proxies.filter(
-                    member_atoms__standard__grade_levels__grade_numeric__in=grade_levels
-                ).distinct()
-            elif run.run_type in ['standards', 'topics']:
-                proxies = proxies.filter(
-                    member_standards__grade_levels__grade_numeric__in=grade_levels
-                ).distinct()
-        
-        # Build per-state breakdown
-        result = []
-        
-        # Determine states to analyze
-        if state_code:
-            states = [state_code]
-        else:
-            # Get all states represented in the proxies
-            states = set()
-            for proxy in proxies:
-                if hasattr(proxy, 'member_atoms') and proxy.member_atoms.exists():
-                    member_states = set(
-                        proxy.member_atoms.values_list('standard__state__code', flat=True)
-                    )
-                    states.update(member_states)
-                elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
-                    member_states = set(
-                        proxy.member_standards.values_list('state__code', flat=True)
-                    )
-                    states.update(member_states)
-            states = [s for s in states if s]
-        
-        # Precompute mapping: standard_id -> proxy titles that cover it
-        std_to_proxy_titles = {}
-        for proxy in proxies:
-            title = getattr(proxy, 'title', '') or getattr(proxy, 'proxy_id', str(proxy.id))
-            
-            if hasattr(proxy, 'member_atoms') and proxy.member_atoms.exists():
-                member_query = proxy.member_atoms.all()
-                if state_code:
-                    member_query = member_query.filter(standard__state__code=state_code)
-                if grade_levels:
-                    member_query = member_query.filter(
-                        standard__grade_levels__grade_numeric__in=grade_levels
-                    ).distinct()
-                
-                for sid in member_query.values_list('standard_id', flat=True):
-                    std_to_proxy_titles.setdefault(sid, set()).add(title)
-                    
-            elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
-                member_query = proxy.member_standards.all()
-                if state_code:
-                    member_query = member_query.filter(state__code=state_code)
-                if grade_levels:
-                    member_query = member_query.filter(
-                        grade_levels__grade_numeric__in=grade_levels
-                    ).distinct()
-                
-                for sid in member_query.values_list('id', flat=True):
-                    std_to_proxy_titles.setdefault(sid, set()).add(title)
-        
-        # Process each state
-        for code in states:
-            # Get all standards in this state within the filtered scope
-            state_standards_qs = Standard.objects.filter(state__code=code)
+            report_scope, scope_standard_ids, report_metadata, _ = _load_report_scope(view, request, report_id_param)
+        except PermissionDenied as exc:
+            return view.error_response(str(exc), status=403)
+        except ValidationError as exc:
+            message = str(exc)
+            if message == 'Coverage report not found':
+                return view.error_response(message, status=404)
+            return view.validation_error_response(message)
+
+        if run_id:
+            try:
+                run = ProxyRun.objects.get(run_id=run_id, status='completed')
+            except ProxyRun.DoesNotExist:
+                return view.error_response('Run not found', status=404)
+
+            proxies = run.get_associated_proxies()
             if grade_levels:
-                state_standards_qs = state_standards_qs.filter(
-                    grade_levels__grade_numeric__in=grade_levels
-                ).distinct()
-            
-            all_ids = set(state_standards_qs.values_list('id', flat=True))
-            
-            # Find covered standards by proxies
-            covered_ids = set()
-            for proxy in proxies:
-                if hasattr(proxy, 'member_atoms') and proxy.member_atoms.exists():
-                    proxy_covered = set(
-                        proxy.member_atoms.filter(
-                            standard__state__code=code
-                        ).values_list('standard_id', flat=True)
-                    )
-                    covered_ids.update(proxy_covered)
-                elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
-                    proxy_covered = set(
-                        proxy.member_standards.filter(
-                            state__code=code
-                        ).values_list('id', flat=True)
-                    )
-                    covered_ids.update(proxy_covered)
-            
-            covered_ids = covered_ids & all_ids
-            not_covered_ids = all_ids - covered_ids
-            
-            # Build detailed results
-            covered_standards = []
-            for standard in Standard.objects.filter(id__in=covered_ids):
-                covered_standards.append({
-                    'id': str(standard.id),
-                    'code': standard.code,
-                    'title': standard.title or '',
-                    'description': standard.description or '',
-                    'state__code': standard.state.code if standard.state else '',
-                    'proxy_titles': sorted(list(std_to_proxy_titles.get(standard.id, [])))
-                })
-            
-            not_covered_standards = []
-            for standard in Standard.objects.filter(id__in=not_covered_ids):
-                not_covered_standards.append({
-                    'id': str(standard.id),
-                    'code': standard.code,
-                    'title': standard.title or '',
-                    'description': standard.description or '',
-                    'state__code': standard.state.code if standard.state else '',
-                })
-            
-            coverage_percentage = (len(covered_ids) / len(all_ids) * 100) if all_ids else 0
-            
-            result.append({
-                'state': code,
-                'covered_count': len(covered_ids),
-                'total_count': len(all_ids),
-                'coverage_percentage': round(coverage_percentage, 2),
-                'covered': covered_standards,
-                'not_covered': not_covered_standards,
+                if run.run_type == 'atoms':
+                    proxies = proxies.filter(
+                        member_atoms__standard__grade_levels__grade_numeric__in=grade_levels
+                    ).distinct()
+                elif run.run_type in ['standards', 'topics']:
+                    proxies = proxies.filter(
+                        member_standards__grade_levels__grade_numeric__in=grade_levels
+                    ).distinct()
+
+            result, global_covered_ids = _build_run_state_coverage(
+                proxies=proxies,
+                state_code=state_code,
+                grade_levels=grade_levels,
+                scope_standard_ids=scope_standard_ids,
+                subject_area_id=subject_area_id,
+            )
+
+            if report_scope is not None and report_metadata is not None:
+                clusters_with_coverage = _compute_cluster_coverage(report_scope, global_covered_ids) or []
+                report_metadata['clusters'] = clusters_with_coverage
+
+            return view.success_response({
+                'run_id': run_id,
+                'states': result,
+                'total_states': len(result),
+                'parameters': {
+                    'grade_levels': grade_levels,
+                    'state_filter': state_code,
+                    'report_id': report_metadata['id'] if report_metadata else None,
+                },
+                'report': report_metadata,
             })
-        
-        # Sort by state code for consistency
+
+        # Report-only analysis
+        if not report_scope or not scope_standard_ids:
+            return view.validation_error_response('report_id is required when run_id is not provided')
+
+        base_qs = Standard.objects.all()
+        if grade_levels:
+            base_qs = base_qs.filter(grade_levels__grade_numeric__in=grade_levels)
+        if state_code:
+            base_qs = base_qs.filter(state__code=state_code)
+        if subject_area_id is not None:
+            base_qs = base_qs.filter(subject_area_id=subject_area_id)
+        base_qs = base_qs.distinct()
+
+        base_rows = list(
+            base_qs.values('id', 'code', 'title', 'description', 'state__code')
+        )
+
+        base_entry_map: Dict[uuid.UUID, Dict[str, Any]] = {}
+        base_state_map: Dict[str, Set[uuid.UUID]] = {}
+        for row in base_rows:
+            std_id = row['id']
+            state = row['state__code'] or ''
+            entry = {
+                'id': str(std_id),
+                'code': row['code'],
+                'title': row['title'] or '',
+                'description': row['description'] or '',
+                'state__code': state,
+                'proxy_titles': [],
+            }
+            base_entry_map[std_id] = entry
+            if state:
+                base_state_map.setdefault(state, set()).add(std_id)
+
+        cluster_qs = Standard.objects.filter(id__in=scope_standard_ids)
+        if grade_levels:
+            cluster_qs = cluster_qs.filter(grade_levels__grade_numeric__in=grade_levels).distinct()
+        if subject_area_id is not None:
+            cluster_qs = cluster_qs.filter(subject_area_id=subject_area_id)
+        cluster_rows = list(
+            cluster_qs.values('id', 'state__code')
+        )
+
+        cluster_state_map: Dict[str, Set[uuid.UUID]] = {}
+        for row in cluster_rows:
+            std_id = row['id']
+            state = row['state__code'] or ''
+            cluster_state_map.setdefault(state, set()).add(std_id)
+
+        states = sorted(set(base_state_map.keys()) | set(cluster_state_map.keys()))
+
+        result = []
+        covered_ids_set: Set[uuid.UUID] = set()
+        for state in states:
+            base_ids = base_state_map.get(state, set())
+            if not base_ids:
+                continue
+            covered_ids = (cluster_state_map.get(state, set()) & base_ids)
+            covered_ids_set.update(covered_ids)
+
+            covered_entries = [dict(base_entry_map[sid]) for sid in covered_ids]
+            not_covered_ids = base_ids - covered_ids
+            not_covered_entries = [dict(base_entry_map[sid]) for sid in not_covered_ids]
+
+            coverage_percentage = (
+                (len(covered_ids) / len(base_ids) * 100) if base_ids else 0.0
+            )
+
+            result.append({
+                'state': state,
+                'covered_count': len(covered_entries),
+                'total_count': len(base_ids),
+                'coverage_percentage': round(coverage_percentage, 2),
+                'covered': covered_entries,
+                'not_covered': not_covered_entries,
+            })
+
         result.sort(key=lambda x: x['state'])
-        
+
+        clusters_with_coverage = _compute_cluster_coverage(report_scope, covered_ids_set) if report_scope else []
+        if report_metadata is not None:
+            report_metadata['clusters'] = clusters_with_coverage or []
+
         return view.success_response({
-            'run_id': run_id,
+            'run_id': None,
             'states': result,
             'total_states': len(result),
             'parameters': {
                 'grade_levels': grade_levels,
-                'state_filter': state_code
-            }
+                'state_filter': state_code,
+                'report_id': report_metadata['id'] if report_metadata else None,
+            },
+            'report': report_metadata,
         })
-        
+
     except ValidationError as e:
         return view.validation_error_response(str(e))
     except Exception as e:
@@ -336,139 +704,189 @@ def proxy_run_coverage_api(request):
 def proxy_run_proxies_api(request):
     """Return standards in scope and proxy standards with covered standards"""
     view = ProxyAPIView()
-    
+
     try:
-        # Validate required parameters
-        run_id = view.validate_string(
-            request.GET.get('run_id'),
-            min_length=1,
-            max_length=100,
-            field_name="run_id"
-        )
-        
-        # Optional parameters
+        run_id_param = request.GET.get('run_id')
+        report_id_param = request.GET.get('report_id')
+
+        if not run_id_param and not report_id_param:
+            return view.validation_error_response('run_id or report_id is required')
+
+        run_id = None
+        if run_id_param:
+            run_id = view.validate_string(run_id_param, min_length=1, max_length=100, field_name='run_id')
+
         state_code = request.GET.get('state')
         if state_code:
-            state_code = view.validate_string(state_code, max_length=2, field_name="state").upper()
-        
+            state_code = view.validate_string(state_code, max_length=2, field_name='state').upper()
+
         grades_param = request.GET.get('grades')
         grade_levels = None
         if grades_param:
-            grade_levels = view.validate_list_of_integers(grades_param, field_name="grades")
+            grade_levels = view.validate_list_of_integers(grades_param, field_name='grades')
             grade_levels = view.validate_grade_levels(grade_levels)
-        subject_area_id = request.GET.get('subject_area_id')
-        subject_area_id = int(subject_area_id) if subject_area_id else None
-        
-        # Get proxy run
+
+        subject_area_id_param = request.GET.get('subject_area_id')
+        subject_area_id = int(subject_area_id_param) if subject_area_id_param else None
+
         try:
-            run = ProxyRun.objects.get(run_id=run_id, status='completed')
-        except ProxyRun.DoesNotExist:
-            return view.error_response('Run not found', status=404)
-        
-        proxies = run.get_associated_proxies()
-        
-        # Build standards in scope (filtered universe)
-        standards_qs = Standard.objects.all()
-        if state_code:
-            standards_qs = standards_qs.filter(state__code=state_code)
-        if grade_levels:
-            standards_qs = standards_qs.filter(
-                grade_levels__grade_numeric__in=grade_levels
-            ).distinct()
-        
-        # Use pagination for large datasets
-        paginated_standards = view.paginate_queryset(standards_qs, request, page_size=100)
-        standards_in_scope = list(
-            standards_qs.values('id', 'code', 'title', 'description', 'state__code')
-        )
-        scope_ids = set(standards_qs.values_list('id', flat=True))
-        
-        # Process each proxy
-        proxy_items = []
-        for proxy in proxies:
-            covered_ids = set()
-            
-            # Determine covered standards for this proxy within scope
-            if hasattr(proxy, 'member_atoms') and proxy.member_atoms.exists():
-                member_query = proxy.member_atoms.all()
-                if state_code:
-                    member_query = member_query.filter(standard__state__code=state_code)
-                if grade_levels:
-                    member_query = member_query.filter(
-                        standard__grade_levels__grade_numeric__in=grade_levels
+            report_scope, scope_standard_ids, report_metadata, _ = _load_report_scope(view, request, report_id_param)
+        except PermissionDenied as exc:
+            return view.error_response(str(exc), status=403)
+        except ValidationError as exc:
+            message = str(exc)
+            if message == 'Coverage report not found':
+                return view.error_response(message, status=404)
+            return view.validation_error_response(message)
+
+        if run_id:
+            try:
+                run = ProxyRun.objects.get(run_id=run_id, status='completed')
+            except ProxyRun.DoesNotExist:
+                return view.error_response('Run not found', status=404)
+
+            proxies = run.get_associated_proxies()
+            if grade_levels:
+                if run.run_type == 'atoms':
+                    proxies = proxies.filter(
+                        member_atoms__standard__grade_levels__grade_numeric__in=grade_levels
                     ).distinct()
-                if subject_area_id:
-                    member_query = member_query.filter(standard__subject_area_id=subject_area_id)
-                covered_ids.update(member_query.values_list('standard_id', flat=True))
-                
-            elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
-                member_query = proxy.member_standards.all()
-                if state_code:
-                    member_query = member_query.filter(state__code=state_code)
-                if grade_levels:
-                    member_query = member_query.filter(
-                        grade_levels__grade_numeric__in=grade_levels
+                elif run.run_type in ['standards', 'topics']:
+                    proxies = proxies.filter(
+                        member_standards__grade_levels__grade_numeric__in=grade_levels
                     ).distinct()
-                if subject_area_id:
-                    member_query = member_query.filter(subject_area_id=subject_area_id)
-                covered_ids.update(member_query.values_list('id', flat=True))
-            
-            covered_ids = list(covered_ids & scope_ids)
-            covered_standards = list(
-                Standard.objects.filter(id__in=covered_ids).values(
+
+            standards_qs = Standard.objects.all()
+            if state_code:
+                standards_qs = standards_qs.filter(state__code=state_code)
+            if grade_levels:
+                standards_qs = standards_qs.filter(grade_levels__grade_numeric__in=grade_levels)
+            if subject_area_id is not None:
+                standards_qs = standards_qs.filter(subject_area_id=subject_area_id)
+            if scope_standard_ids is not None:
+                standards_qs = standards_qs.filter(id__in=scope_standard_ids)
+
+            standards_qs = standards_qs.distinct()
+            standards_in_scope = list(
+                standards_qs.values('id', 'code', 'title', 'description', 'state__code')
+            )
+            scope_ids = set(standards_qs.values_list('id', flat=True))
+
+            proxy_items = []
+            covered_all_ids: Set[uuid.UUID] = set()
+            for proxy in proxies:
+                covered_ids: Set[uuid.UUID] = set()
+
+                if hasattr(proxy, 'member_atoms') and proxy.member_atoms.exists():
+                    member_query = proxy.member_atoms.all()
+                    if state_code:
+                        member_query = member_query.filter(standard__state__code=state_code)
+                    if grade_levels:
+                        member_query = member_query.filter(
+                            standard__grade_levels__grade_numeric__in=grade_levels
+                        ).distinct()
+                    if subject_area_id is not None:
+                        member_query = member_query.filter(standard__subject_area_id=subject_area_id)
+                    if scope_standard_ids is not None:
+                        member_query = member_query.filter(standard_id__in=scope_standard_ids)
+                    covered_ids.update(member_query.values_list('standard_id', flat=True))
+
+                elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
+                    member_query = proxy.member_standards.all()
+                    if state_code:
+                        member_query = member_query.filter(state__code=state_code)
+                    if grade_levels:
+                        member_query = member_query.filter(
+                            grade_levels__grade_numeric__in=grade_levels
+                        ).distinct()
+                    if subject_area_id is not None:
+                        member_query = member_query.filter(subject_area_id=subject_area_id)
+                    if scope_standard_ids is not None:
+                        member_query = member_query.filter(id__in=scope_standard_ids)
+                    covered_ids.update(member_query.values_list('id', flat=True))
+
+                covered_ids = covered_ids & scope_ids
+                covered_all_ids.update(covered_ids)
+                covered_standards = list(
+                    Standard.objects.filter(id__in=covered_ids).values(
+                        'id', 'code', 'title', 'description', 'state__code'
+                    )
+                ) or []
+
+                unique_states_in_scope = len({
+                    s['state__code'] for s in covered_standards if s['state__code']
+                })
+
+                if hasattr(proxy, 'member_standards') and not hasattr(proxy, 'member_atoms'):
+                    proxy_type = 'topics' if run.run_type == 'topics' else 'standards'
+                else:
+                    proxy_type = getattr(proxy, 'source_type', 'atoms') or 'atoms'
+
+                proxy_items.append({
+                    'proxy_id': getattr(proxy, 'proxy_id', str(proxy.id)),
+                    'title': getattr(proxy, 'title', '') or '',
+                    'description': getattr(proxy, 'description', '') or '',
+                    'coverage_count': getattr(proxy, 'coverage_count', 0),
+                    'states_in_scope': unique_states_in_scope,
+                    'covered_count': len(covered_standards),
+                    'covered': covered_standards or [],
+                    'proxy_type': proxy_type,
+                })
+
+            not_covered_ids = list(scope_ids - covered_all_ids)
+            not_covered_standards = list(
+                Standard.objects.filter(id__in=not_covered_ids).values(
                     'id', 'code', 'title', 'description', 'state__code'
                 )
             ) or []
-            
-            # Calculate unique states covered in current scope
-            unique_states_in_scope = len(set(
-                s['state__code'] for s in covered_standards if s['state__code']
-            ))
-            
-            # Determine proxy type badge
-            if hasattr(proxy, 'member_standards') and not hasattr(proxy, 'member_atoms'):
-                proxy_type = 'topics' if run.run_type == 'topics' else 'standards'
-            else:
-                proxy_type = getattr(proxy, 'source_type', 'atoms') or 'atoms'
 
-            proxy_items.append({
-                'proxy_id': getattr(proxy, 'proxy_id', str(proxy.id)),
-                'title': getattr(proxy, 'title', '') or '',
-                'description': getattr(proxy, 'description', '') or '',
-                'coverage_count': getattr(proxy, 'coverage_count', 0),
-                'states_in_scope': unique_states_in_scope,
-                'covered_count': len(covered_standards),
-                'covered': covered_standards or [],
-                'proxy_type': proxy_type,
+            proxy_items.sort(key=lambda x: (x['states_in_scope'], x['covered_count']), reverse=True)
+
+            if report_scope is not None and report_metadata is not None:
+                clusters_with_coverage = _compute_cluster_coverage(report_scope, covered_all_ids) or []
+                report_metadata['clusters'] = clusters_with_coverage
+
+            return view.success_response({
+                'run_id': run_id,
+                'standards_in_scope_count': len(standards_in_scope),
+                'standards_in_scope': standards_in_scope,
+                'proxies': proxy_items,
+                'not_covered': not_covered_standards,
+                'parameters': {
+                    'grade_levels': grade_levels,
+                    'state_filter': state_code,
+                    'report_id': report_metadata['id'] if report_metadata else None,
+                },
+                'report': report_metadata,
             })
-        
-        # Calculate overall not covered standards
-        covered_all_ids = set()
-        for item in proxy_items:
-            covered_all_ids.update(s['id'] for s in item['covered'])
-        
-        not_covered_ids = list(scope_ids - covered_all_ids)
-        not_covered_standards = list(
-            Standard.objects.filter(id__in=not_covered_ids).values(
-                'id', 'code', 'title', 'description', 'state__code'
-            )
-        ) or []
-        
-        # Sort proxies by states covered in scope, then by standards covered
-        proxy_items.sort(key=lambda x: (x['states_in_scope'], x['covered_count']), reverse=True)
-        
+
+        if not report_scope:
+            return view.validation_error_response('report_id is required when run_id is not provided')
+
+        standards_in_scope, proxy_items, covered_all_ids, not_covered = _build_report_cluster_items(
+            report_scope,
+            grade_levels=grade_levels,
+            state_code=state_code,
+            subject_area_id=subject_area_id,
+        )
+
+        if report_metadata is not None:
+            report_metadata['clusters'] = _compute_cluster_coverage(report_scope, covered_all_ids) or []
+
         return view.success_response({
-            'run_id': run_id,
+            'run_id': None,
             'standards_in_scope_count': len(standards_in_scope),
             'standards_in_scope': standards_in_scope,
             'proxies': proxy_items,
-            'not_covered': not_covered_standards,
+            'not_covered': not_covered,
             'parameters': {
                 'grade_levels': grade_levels,
-                'state_filter': state_code
-            }
+                'state_filter': state_code,
+                'report_id': report_metadata['id'] if report_metadata else None,
+            },
+            'report': report_metadata,
         })
-        
+
     except ValidationError as e:
         return view.validation_error_response(str(e))
     except Exception as e:
