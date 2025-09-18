@@ -8,6 +8,7 @@ from django.utils import timezone
 from django.db.models import Count, Q
 from sklearn.metrics.pairwise import cosine_similarity
 from collections import Counter
+from django.core.cache import cache
 import re
 from .base import BaseService
 from ..models import (
@@ -444,6 +445,80 @@ class CustomClusterService(BaseService):
             'title': report.title,
             'clusters': summaries,
         }
+
+    def build_report_scope(
+        self,
+        report: ClusterReport,
+        *,
+        use_cache: bool = True,
+        cache_timeout: int = 3600,
+    ) -> Dict[str, Any]:
+        """Flatten report clusters into standard id sets for downstream coverage overlays."""
+
+        cache_key: Optional[str] = None
+        if use_cache and report.updated_at:
+            timestamp = int(report.updated_at.timestamp())
+            cache_key = f"cluster_report_scope:{report.id}:{timestamp}"
+            cached = cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        entries = list(
+            report.clusterreportentry_set.select_related('cluster')
+            .prefetch_related('cluster__clustermembership_set__standard__state')
+            .order_by('selection_order')
+        )
+
+        standard_ids: set = set()
+        clusters: List[Dict[str, Any]] = []
+        states_counter: Counter = Counter()
+
+        for entry in entries:
+            cluster = entry.cluster
+            memberships = list(
+                cluster.clustermembership_set.select_related('standard__state').order_by('selection_order')
+            )
+
+            cluster_standard_ids: List[str] = []
+            cluster_states: Counter = Counter()
+
+            for membership in memberships:
+                standard = membership.standard
+                if not standard:
+                    continue
+                standard_ids.add(str(standard.id))
+                cluster_standard_ids.append(str(standard.id))
+                if standard.state and standard.state.code:
+                    cluster_states[standard.state.code] += 1
+                    states_counter[standard.state.code] += 1
+
+            clusters.append({
+                'cluster_id': str(cluster.id),
+                'cluster_name': cluster.name,
+                'selection_order': entry.selection_order,
+                'notes': entry.notes,
+                'standard_ids': cluster_standard_ids,
+                'standards_count': len(cluster_standard_ids),
+                'states_breakdown': dict(cluster_states),
+                'cluster_description': cluster.description,
+            })
+
+        scope_payload = {
+            'report_id': str(report.id),
+            'title': report.title,
+            'description': report.description,
+            'updated_at': report.updated_at,
+            'is_shared': report.is_shared,
+            'total_clusters': len(clusters),
+            'standard_ids': sorted(standard_ids),
+            'states_breakdown': dict(states_counter),
+            'clusters': clusters,
+        }
+
+        if cache_key:
+            cache.set(cache_key, scope_payload, cache_timeout)
+
+        return scope_payload
 
     def _collect_grade_levels(self, standards: Iterable[Standard]) -> List[GradeLevel]:
         grade_ids = set()

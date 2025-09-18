@@ -15,14 +15,16 @@
     <div class="col-md-4">
       <label class="form-label">Select Run</label>
       <select id="runSelect" class="form-select" aria-describedby="runSelectHelp">
-        <option value="">Choose a run…</option>
+        <option value="">Choose a run or coverage report…</option>
+        <optgroup label="Proxy Runs">
         {% for r in runs %}
-          <option value="{{ r.run_id }}" {% if selected_run and r.run_id == selected_run.run_id %}selected{% endif %}>
+          <option value="run:{{ r.run_id }}" {% if selected_run and r.run_id == selected_run.run_id %}selected{% endif %}>
             {{ r.name }} ({{ r.get_run_type_display }}) — {{ r.started_at|date:"Y-m-d H:i" }}
           </option>
         {% endfor %}
+        </optgroup>
       </select>
-      <div id="runSelectHelp" class="form-text">Select a proxy generation run to analyze</div>
+      <div id="runSelectHelp" class="form-text">Select a proxy run or choose a saved coverage report (available below) to analyze.</div>
     </div>
     <div class="col-md-3">
       <label class="form-label" for="gradesInput">Grades (comma-separated)</label>
@@ -205,6 +207,35 @@
   let coverageChart = null;
   const ctx = document.getElementById('coverageChart').getContext('2d');
 
+  function parseSelection(value) {
+    if (!value) {
+      return null;
+    }
+    const [type, ...rest] = String(value).split(':');
+    if (!type || rest.length === 0) {
+      return null;
+    }
+    const id = rest.join(':');
+    if (!id) {
+      return null;
+    }
+    return { type, id };
+  }
+
+  function getSelectionLabel(selection) {
+    if (!selection) return null;
+    if (selection.type === 'run') {
+      if (!runSelect) return 'Proxy run';
+      const option = Array.from(runSelect.options).find(opt => opt.value === `run:${selection.id}`);
+      return option ? option.textContent : 'Proxy run';
+    }
+    if (selection.type === 'report') {
+      const option = runSelect ? Array.from(runSelect.options).find(opt => opt.value === `report:${selection.id}`) : null;
+      return option ? option.textContent : 'Coverage report';
+    }
+    return null;
+  }
+
   function showStatus(text, cls) {
     statusDiv.className = 'alert ' + (cls || 'alert-info');
     statusDiv.textContent = text;
@@ -226,8 +257,63 @@
     window.history.replaceState({}, '', url);
   }
 
-  async function fetchCoverage(runId, grades, state){
-    const params = new URLSearchParams({ run_id: runId });
+  async function loadCoverageReports(){
+    if (!runSelect) {
+      return;
+    }
+
+    try {
+      const resp = await fetch(`{% url 'dashboard:proxy_coverage_reports_api' %}`);
+      const payload = await resp.json();
+      if (!resp.ok) {
+        throw new Error(payload.error || `HTTP ${resp.status}`);
+      }
+      const actual = payload.data || payload;
+      const reports = Array.isArray(actual.reports) ? actual.reports : [];
+      populateReportSelect(reports);
+    } catch (error) {
+      console.error('Failed to load coverage reports', error);
+      populateReportSelect([]);
+      showStatus('Unable to load coverage reports. Defaulting to full scope.', 'alert-warning');
+    }
+  }
+
+  function populateReportSelect(reports){
+    if (!runSelect) {
+      return;
+    }
+
+    const existingGroup = runSelect.querySelector('optgroup[data-type="coverage-reports"]');
+    if (existingGroup) {
+      existingGroup.remove();
+    }
+
+    if (!reports.length) {
+      return;
+    }
+
+    const group = document.createElement('optgroup');
+    group.label = 'Custom Coverage Reports';
+    group.dataset.type = 'coverage-reports';
+
+    reports.forEach(report => {
+      const option = document.createElement('option');
+      option.value = `report:${report.id}`;
+      option.textContent = report.title;
+      option.dataset.selectionType = 'report';
+      group.appendChild(option);
+    });
+
+    runSelect.appendChild(group);
+  }
+
+  async function fetchCoverage(runId, grades, state, reportId){
+    const params = new URLSearchParams();
+    if (runId) params.set('run_id', runId);
+    if (reportId) params.set('report_id', reportId);
+    if (!runId && !reportId) {
+      throw new Error('A run or coverage report must be selected');
+    }
     if (grades) params.set('grades', grades);
     if (state) params.set('state', state);
     const url = `{% url 'dashboard:proxy_run_coverage_api' %}?` + params.toString();
@@ -345,7 +431,12 @@
             <div class="col-md-6">
               <h6>Not Covered (${(row.not_covered || []).length})</h6>
               <div class="border rounded p-2" style="max-height: 240px; overflow:auto;">
-                ${(row.not_covered || []).map(s => `<div class="mb-1"><div><code>${s.state__code}</code> · <code>${s.code}</code> — <strong>${s.title || ''}</strong></div><div class="text-muted small">${s.description || ''}</div></div>`).join('') || '<em>None</em>'}
+                ${(row.not_covered || []).map(s => `
+                  <div class="mb-1">
+                    <div><code>${s.state__code}</code> · <code>${s.code}</code> — <strong>${s.title || ''}</strong></div>
+                    <div class="text-muted small">${s.description || ''}</div>
+                  </div>
+                `).join('') || '<em>None</em>'}
               </div>
             </div>
           </div>
@@ -510,57 +601,89 @@
   }
 
   async function loadCoverage(){
-    const runId = runSelect.value || getQueryParam('run_id');
-    if (!runId) { showStatus('Select a run to view coverage', 'alert-warning'); return; }
-    
-    // Show loading state
+    const selection = parseSelection(runSelect.value);
+    const fallbackRun = getQueryParam('run_id');
+    const fallbackReport = getQueryParam('report_id');
+    const inferredSelection = selection
+      || (fallbackRun ? { type: 'run', id: fallbackRun } : null)
+      || (fallbackReport ? { type: 'report', id: fallbackReport } : null);
+
+    if (!inferredSelection) {
+      showStatus('Select a proxy run or coverage report to view coverage.', 'alert-warning');
+      return;
+    }
+
+    if (!selection && inferredSelection) {
+      const value = `${inferredSelection.type}:${inferredSelection.id}`;
+      if (runSelect.value !== value) {
+        runSelect.value = value;
+      }
+    }
+
     loadBtn.disabled = true;
     document.getElementById('loadSpinner').style.display = 'inline-block';
     document.getElementById('loadText').textContent = 'Loading...';
     clearStatus();
-    setQueryParam('run_id', runId);
     
     try {
       showStatus('Loading coverage…', 'alert-secondary');
       const grades = gradesInput.value.trim();
       const state = stateSelect.value;
-      const data = await fetchCoverage(runId, grades, state);
+      let data;
+      let selectionLabel = getSelectionLabel(inferredSelection);
+
+      if (inferredSelection.type === 'run') {
+        setQueryParam('run_id', inferredSelection.id);
+        setQueryParam('report_id', '');
+        data = await fetchCoverage(inferredSelection.id, grades, state, null);
+      } else if (inferredSelection.type === 'report') {
+        setQueryParam('report_id', inferredSelection.id);
+        setQueryParam('run_id', '');
+        data = await fetchCoverage(null, grades, state, inferredSelection.id);
+      } else {
+        throw new Error('Unsupported selection type');
+      }
+
       const stateCodes = (data.states || []).map(s => s.state);
       renderStateSelect(stateCodes);
       renderTable(data.states || []);
       attachRowHandlers();
       applyTableFilter();
       
-      // Create chart and update summary
       createCoverageChart(data.states || []);
       updateCoverageSummary(data.states || []);
-      
-      showStatus(`Loaded ${(data.states || []).length} state rows`, 'alert-success');
 
-      // Also fetch proxies detail
-      await loadProxies();
+      const statusMsg = selectionLabel
+        ? `Loaded ${(data.states || []).length} state rows (${selectionLabel})`
+        : `Loaded ${(data.states || []).length} state rows`;
+      showStatus(statusMsg, 'alert-success');
+
+      await loadProxies(inferredSelection);
     } catch (e) {
       console.error('Error loading coverage:', e);
       showStatus('Error: ' + e.message, 'alert-danger');
     } finally {
-      // Reset loading state
       loadBtn.disabled = false;
       document.getElementById('loadSpinner').style.display = 'none';
       document.getElementById('loadText').textContent = 'Load Coverage';
     }
   }
 
-  async function loadProxies(){
-    const runId = runSelect.value || getQueryParam('run_id');
-    if (!runId) {
-      console.warn('No run ID available for loading proxies');
+  async function loadProxies(selection){
+    const effectiveSelection = selection || parseSelection(runSelect.value);
+    if (!effectiveSelection) {
+      console.warn('No selection available for loading proxies');
       return;
     }
-    
-    console.log('Loading proxies for run ID:', runId);
+
     const grades = gradesInput.value.trim();
     const state = stateSelect.value;
-    const params = new URLSearchParams({ run_id: runId });
+    const params = new URLSearchParams();
+    if (effectiveSelection.type === 'run') {
+      params.set('run_id', effectiveSelection.id);
+    } else if (effectiveSelection.type === 'report') {
+      params.set('report_id', effectiveSelection.id);
+    }
     if (grades) params.set('grades', grades);
     if (state) params.set('state', state);
     const url = `{% url 'dashboard:proxy_run_proxies_api' %}?` + params.toString();
@@ -581,13 +704,13 @@
       
       // Fix: The actual data is nested in data.data
       const actualData = data.data || data;
-      
+
       console.log('Processing proxy data:', { 
         proxies: actualData.proxies?.length, 
         not_covered: actualData.not_covered?.length,
         standards_in_scope: actualData.standards_in_scope_count 
       });
-      
+
       // Debug: Log the actual data structure
       if (actualData.proxies && actualData.proxies.length > 0) {
         console.log('First proxy structure:', Object.keys(actualData.proxies[0]));
@@ -743,38 +866,65 @@
     }
   }
 
-  // Initialize from URL param if present
-  const initialRun = getQueryParam('run_id');
-  if (initialRun) {
-    runSelect.value = initialRun;
-    
-    // If the run_id is not in the dropdown options, add it
-    const existingOption = runSelect.querySelector(`option[value="${initialRun}"]`);
-    if (!existingOption) {
-      const option = document.createElement('option');
-      option.value = initialRun;
-      option.textContent = `Run ${initialRun}`;
-      option.selected = true;
-      runSelect.appendChild(option);
-      console.log('Added missing run option:', initialRun);
-    }
-    
-    // Load the data immediately - try coverage first, fallback to proxies only
-    console.log('Initializing with run_id:', initialRun);
-    
-    loadCoverage().catch(coverageError => {
-      console.warn('Coverage loading failed, trying proxies only:', coverageError);
-      
-      // If coverage fails, try to load just the proxies data
-      return loadProxies().catch(proxiesError => {
-        console.error('Both coverage and proxies loading failed:', proxiesError);
-        showStatus('Error loading data for run ' + initialRun + ': ' + proxiesError.message, 'alert-danger');
-      });
+  if (runSelect) {
+    runSelect.addEventListener('change', () => {
+      if (!runSelect.value) {
+        statusDiv.classList.add('d-none');
+        return;
+      }
+      loadCoverage();
     });
   }
 
   loadBtn.addEventListener('click', loadCoverage);
   tableFilter.addEventListener('input', applyTableFilter);
+
+  (async function init(){
+    await loadCoverageReports();
+
+    const initialReport = getQueryParam('report_id');
+    if (initialReport && runSelect) {
+      const reportValue = `report:${initialReport}`;
+      const match = runSelect.querySelector(`option[value="${reportValue}"]`);
+      if (match) {
+        runSelect.value = reportValue;
+      }
+    }
+
+    const initialRun = getQueryParam('run_id');
+    if (!runSelect.value && initialRun) {
+      const runValue = `run:${initialRun}`;
+      const existingOption = runSelect.querySelector(`option[value="${runValue}"]`);
+      if (!existingOption) {
+        const option = document.createElement('option');
+        option.value = runValue;
+        option.textContent = `Run ${initialRun}`;
+        option.selected = true;
+        const runsGroup = runSelect.querySelector('optgroup[label="Proxy Runs"]');
+        if (runsGroup) {
+          runsGroup.appendChild(option);
+        } else {
+          runSelect.appendChild(option);
+        }
+      } else {
+        runSelect.value = runValue;
+      }
+    }
+
+    if (runSelect.value) {
+      try {
+        await loadCoverage();
+      } catch (coverageError) {
+        console.warn('Coverage loading failed, trying proxies only:', coverageError);
+        try {
+          await loadProxies(parseSelection(runSelect.value));
+        } catch (proxiesError) {
+          console.error('Both coverage and proxies loading failed:', proxiesError);
+          showStatus('Error loading data: ' + proxiesError.message, 'alert-danger');
+        }
+      }
+    }
+  })();
 })();
 </script>
 {% endblock %}
