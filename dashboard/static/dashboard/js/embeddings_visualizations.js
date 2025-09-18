@@ -6,6 +6,8 @@
         themes: null
     };
 
+    const savedClusterSessionKeys = new Set();
+
     function getEndpoint(name) {
         if (window.dashboardEmbeddings && typeof window.dashboardEmbeddings.getEndpoint === 'function') {
             return window.dashboardEmbeddings.getEndpoint(name) || '';
@@ -1008,10 +1010,198 @@
         });
     }
     
+    function clearClusterSaveFeedback(element) {
+        if (!element) {
+            return;
+        }
+        element.classList.add('d-none');
+        element.textContent = '';
+        element.classList.remove('text-danger', 'text-success');
+        if (!element.classList.contains('text-muted')) {
+            element.classList.add('text-muted');
+        }
+    }
+
+    function setClusterSaveFeedback(element, message, variant = 'muted') {
+        if (!element) {
+            return;
+        }
+        element.classList.remove('d-none', 'text-muted', 'text-danger', 'text-success');
+        if (variant === 'error') {
+            element.classList.add('text-danger');
+        } else if (variant === 'success') {
+            element.classList.add('text-success');
+        } else {
+            element.classList.add('text-muted');
+        }
+        element.textContent = message;
+    }
+
+    function buildClusterSessionKey(cluster) {
+        if (!cluster || !Array.isArray(cluster.standards)) {
+            return '';
+        }
+        const standardIds = cluster.standards
+            .map(standard => {
+                if (!standard || !standard.id) {
+                    return null;
+                }
+                return String(standard.id);
+            })
+            .filter(Boolean);
+        if (!standardIds.length) {
+            return '';
+        }
+        return `cluster-${cluster.id ?? 'unknown'}-${standardIds.join('|')}`;
+    }
+
+    function buildCustomClusterPayload(cluster, standardIds) {
+        const rawTitle = (cluster && typeof cluster.name === 'string') ? cluster.name.trim() : '';
+        const safeTitle = rawTitle.length >= 3 ? rawTitle : `Semantic Cluster ${cluster.id ?? ''}`.trim();
+
+        const descriptionParts = [];
+        if (Array.isArray(cluster.key_topics) && cluster.key_topics.length) {
+            descriptionParts.push(`Key topics: ${cluster.key_topics.slice(0, 5).join(', ')}`);
+        }
+        if (Array.isArray(cluster.states) && cluster.states.length) {
+            descriptionParts.push(`States represented: ${cluster.states.slice(0, 5).join(', ')}`);
+        }
+
+        const parameters = currentData.scatter && currentData.scatter.parameters ? currentData.scatter.parameters : {};
+        const parameterSnapshot = {};
+        if (parameters && typeof parameters === 'object') {
+            Object.entries(parameters).forEach(([key, value]) => {
+                if (value !== undefined) {
+                    parameterSnapshot[key] = value;
+                }
+            });
+        }
+
+        return {
+            title: safeTitle || `Semantic Cluster ${new Date().toISOString().slice(0, 10)}`,
+            description: descriptionParts.join(' | '),
+            standard_ids: standardIds,
+            search_context: {
+                source: 'embeddings_dashboard',
+                saved_at: new Date().toISOString(),
+                parameters: parameterSnapshot,
+                cluster_metadata: {
+                    id: cluster.id ?? null,
+                    size: cluster.standards_count || (Array.isArray(cluster.standards) ? cluster.standards.length : standardIds.length),
+                    key_topics: Array.isArray(cluster.key_topics) ? cluster.key_topics : [],
+                    states: Array.isArray(cluster.states) ? cluster.states : []
+                }
+            }
+        };
+    }
+
+    function resetClusterSaveButton(button) {
+        if (!button) {
+            return;
+        }
+        button.disabled = false;
+        button.classList.remove('btn-success');
+        if (!button.classList.contains('btn-outline-success')) {
+            button.classList.add('btn-outline-success');
+        }
+        const defaultLabel = button.dataset.defaultLabel || '<i class="fas fa-bookmark"></i> Save for Analysis';
+        button.innerHTML = defaultLabel;
+    }
+
+    function markClusterSaved(button, feedbackEl, sessionKey, message = 'Saved to Custom Clusters') {
+        if (sessionKey) {
+            savedClusterSessionKeys.add(sessionKey);
+        }
+        if (button) {
+            button.disabled = true;
+            button.classList.remove('btn-outline-success');
+            button.classList.add('btn-success');
+            button.innerHTML = '<i class="fas fa-check"></i> Saved';
+        }
+        setClusterSaveFeedback(feedbackEl, message, 'success');
+    }
+
+    async function saveClusterForAnalysis(cluster, button, feedbackEl) {
+        if (!cluster || !Array.isArray(cluster.standards) || cluster.standards.length === 0) {
+            setClusterSaveFeedback(feedbackEl, 'No standards available to save.', 'error');
+            return;
+        }
+
+        const endpoint = getEndpoint('customClusters');
+        if (!endpoint) {
+            setClusterSaveFeedback(feedbackEl, 'Save endpoint is not configured.', 'error');
+            return;
+        }
+
+        const standardIds = cluster.standards
+            .map(standard => (standard && standard.id ? String(standard.id) : null))
+            .filter(Boolean);
+
+        if (!standardIds.length) {
+            setClusterSaveFeedback(feedbackEl, 'Unable to determine standards for this cluster.', 'error');
+            return;
+        }
+
+        const sessionKey = buildClusterSessionKey(cluster);
+        if (sessionKey && savedClusterSessionKeys.has(sessionKey)) {
+            markClusterSaved(button, feedbackEl, sessionKey, 'Already saved to Custom Clusters');
+            return;
+        }
+
+        const payload = buildCustomClusterPayload(cluster, standardIds);
+
+        if (!button.dataset.defaultLabel) {
+            button.dataset.defaultLabel = button.innerHTML;
+        }
+
+        button.disabled = true;
+        button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Saving...';
+        setClusterSaveFeedback(feedbackEl, 'Saving cluster...', 'muted');
+
+        try {
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCookie('csrftoken') || ''
+                },
+                body: JSON.stringify(payload)
+            });
+
+            const responseText = await response.text();
+            let result = null;
+            if (responseText) {
+                try {
+                    result = JSON.parse(responseText);
+                } catch (parseError) {
+                    console.warn('Received non-JSON response when saving cluster:', parseError);
+                }
+            }
+
+            const success = result && result.success === true;
+
+            if (!response.ok || !success) {
+                const message = (result && (result.error || result.message)) || `Save failed (${response.status})`;
+                const lowered = message.toLowerCase();
+                if (lowered.includes('already exists') || lowered.includes('unique_custom_cluster_per_owner_name')) {
+                    markClusterSaved(button, feedbackEl, sessionKey, 'Cluster already saved to Custom Clusters');
+                    return;
+                }
+                throw new Error(message);
+            }
+
+            markClusterSaved(button, feedbackEl, sessionKey);
+        } catch (error) {
+            console.error('Failed to save cluster for analysis:', error);
+            resetClusterSaveButton(button);
+            setClusterSaveFeedback(feedbackEl, error.message || 'Unable to save cluster.', 'error');
+        }
+    }
+
     function renderClusterInfo(clusters) {
         const container = document.getElementById('cluster-info');
         container.innerHTML = '';
-        
+
         // Debug logging
         console.log('renderClusterInfo called with clusters:', clusters);
         if (clusters && clusters.length > 0) {
@@ -1055,12 +1245,22 @@
             div.className = 'card mb-3';
             div.innerHTML = `
                 <div class="card-body">
-                    <div class="d-flex justify-content-between align-items-start">
-                        <h6 class="card-title mb-2">
-                            <span class="badge bg-primary me-2">${index + 1}</span>
-                            ${cluster.name}
-                        </h6>
-                        <span class="badge bg-secondary">${cluster.standards_count} standards</span>
+                    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+                        <div class="flex-grow-1 me-2">
+                            <h6 class="card-title mb-2">
+                                <span class="badge bg-primary me-2">${index + 1}</span>
+                                ${cluster.name}
+                            </h6>
+                        </div>
+                        <div class="text-end">
+                            <div class="d-flex align-items-center justify-content-end flex-wrap gap-2">
+                                <span class="badge bg-secondary">${cluster.standards_count} standards</span>
+                                <button class="btn btn-outline-success btn-sm save-cluster-btn" type="button">
+                                    <i class="fas fa-bookmark"></i> Save for Analysis
+                                </button>
+                            </div>
+                            <div class="save-cluster-feedback small text-muted mt-1 d-none"></div>
+                        </div>
                     </div>
                     <div class="mb-3">
                         <strong>Key Topics:</strong><br>
@@ -1135,6 +1335,24 @@
                 </div>
             `;
             container.appendChild(div);
+
+            const saveButton = div.querySelector('.save-cluster-btn');
+            const feedbackEl = div.querySelector('.save-cluster-feedback');
+            clearClusterSaveFeedback(feedbackEl);
+
+            if (saveButton) {
+                if (!saveButton.dataset.defaultLabel) {
+                    saveButton.dataset.defaultLabel = saveButton.innerHTML;
+                }
+                const sessionKey = buildClusterSessionKey(cluster);
+                if (sessionKey && savedClusterSessionKeys.has(sessionKey)) {
+                    markClusterSaved(saveButton, feedbackEl, sessionKey);
+                } else {
+                    saveButton.addEventListener('click', function() {
+                        saveClusterForAnalysis(cluster, saveButton, feedbackEl);
+                    });
+                }
+            }
         });
     }
     
