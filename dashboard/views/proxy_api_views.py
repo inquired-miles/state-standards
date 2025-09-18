@@ -267,35 +267,59 @@ def _build_report_cluster_items(
     subject_area_id: Optional[int],
 ):
     clusters = report_scope.get('clusters', []) or []
-    standards_in_scope_map: Dict[str, Dict[str, Any]] = {}
+
+    base_qs = Standard.objects.all()
+    if grade_levels:
+        base_qs = base_qs.filter(grade_levels__grade_numeric__in=grade_levels)
+    if state_code:
+        base_qs = base_qs.filter(state__code=state_code)
+    if subject_area_id is not None:
+        base_qs = base_qs.filter(subject_area_id=subject_area_id)
+    base_qs = base_qs.distinct()
+
+    base_rows = list(base_qs.values('id', 'code', 'title', 'description', 'state__code'))
+    base_entry_map: Dict[uuid.UUID, Dict[str, Any]] = {}
+    for row in base_rows:
+        std_id = row['id']
+        base_entry_map[std_id] = {
+            'id': str(std_id),
+            'code': row['code'],
+            'title': row['title'] or '',
+            'description': row['description'] or '',
+            'state__code': row['state__code'] or '',
+        }
+
+    standards_in_scope = sorted(
+        base_entry_map.values(), key=lambda x: (x['state__code'], x['code'])
+    )
+
     proxy_items: List[Dict[str, Any]] = []
     covered_all_ids: Set[uuid.UUID] = set()
 
     for cluster in clusters:
         standard_ids = cluster.get('standard_ids', []) or []
-        standard_qs = Standard.objects.filter(id__in=standard_ids)
+        cluster_qs = Standard.objects.filter(id__in=standard_ids)
         if grade_levels:
-            standard_qs = standard_qs.filter(grade_levels__grade_numeric__in=grade_levels).distinct()
+            cluster_qs = cluster_qs.filter(grade_levels__grade_numeric__in=grade_levels).distinct()
         if state_code:
-            standard_qs = standard_qs.filter(state__code=state_code)
-        if subject_area_id:
-            standard_qs = standard_qs.filter(subject_area_id=subject_area_id)
+            cluster_qs = cluster_qs.filter(state__code=state_code)
+        if subject_area_id is not None:
+            cluster_qs = cluster_qs.filter(subject_area_id=subject_area_id)
 
-        standards_list = list(
-            standard_qs.values('id', 'code', 'title', 'description', 'state__code')
+        cluster_rows = list(
+            cluster_qs.values('id', 'code', 'title', 'description', 'state__code')
         )
 
-        for item in standards_list:
-            standards_in_scope_map[str(item['id'])] = {
-                'id': str(item['id']),
-                'code': item['code'],
-                'title': item['title'] or '',
-                'description': item['description'] or '',
-                'state__code': item['state__code'] or '',
-            }
-            covered_all_ids.add(uuid.UUID(str(item['id'])))
+        covered_entries = []
+        for row in cluster_rows:
+            std_id = row['id']
+            entry = base_entry_map.get(std_id)
+            if not entry:
+                continue
+            covered_entries.append(dict(entry))
+            covered_all_ids.add(std_id)
 
-        states_in_scope = len({item['state__code'] for item in standards_list if item['state__code']})
+        states_in_scope = len({item['state__code'] for item in covered_entries if item['state__code']})
         coverage_count = len(cluster.get('states_breakdown', {}) or {})
 
         proxy_items.append({
@@ -304,22 +328,18 @@ def _build_report_cluster_items(
             'description': cluster.get('cluster_description') or '',
             'coverage_count': coverage_count,
             'states_in_scope': states_in_scope,
-            'covered_count': len(standards_list),
-            'covered': [
-                {
-                    'id': str(item['id']),
-                    'code': item['code'],
-                    'title': item['title'] or '',
-                    'description': item['description'] or '',
-                    'state__code': item['state__code'] or '',
-                }
-                for item in standards_list
-            ],
+            'covered_count': len(covered_entries),
+            'covered': covered_entries,
             'proxy_type': 'custom_cluster',
         })
 
-    standards_in_scope = sorted(standards_in_scope_map.values(), key=lambda x: x['code'])
-    return standards_in_scope, proxy_items, covered_all_ids
+    not_covered_ids = set(base_entry_map.keys()) - covered_all_ids
+    not_covered = sorted(
+        (dict(base_entry_map[sid]) for sid in not_covered_ids),
+        key=lambda x: (x['state__code'], x['code'])
+    )
+
+    return standards_in_scope, proxy_items, covered_all_ids, not_covered
 
 
 class ProxyAPIView(BaseAPIView):
@@ -562,40 +582,73 @@ def proxy_run_coverage_api(request):
         if not report_scope or not scope_standard_ids:
             return view.validation_error_response('report_id is required when run_id is not provided')
 
-        result = []
-        covered_ids_set = set(scope_standard_ids)
-
-        report_standard_qs = Standard.objects.filter(id__in=scope_standard_ids)
+        base_qs = Standard.objects.all()
         if grade_levels:
-            report_standard_qs = report_standard_qs.filter(
-                grade_levels__grade_numeric__in=grade_levels
-            ).distinct()
-
+            base_qs = base_qs.filter(grade_levels__grade_numeric__in=grade_levels)
         if state_code:
-            report_standard_qs = report_standard_qs.filter(state__code=state_code)
+            base_qs = base_qs.filter(state__code=state_code)
+        base_qs = base_qs.distinct()
 
-        states = sorted({code for code in report_standard_qs.values_list('state__code', flat=True) if code})
+        base_rows = list(
+            base_qs.values('id', 'code', 'title', 'description', 'state__code')
+        )
 
-        for code in states:
-            state_qs = report_standard_qs.filter(state__code=code)
-            standards_list = list(state_qs.values('id', 'code', 'title', 'description', 'state__code'))
+        base_entry_map: Dict[uuid.UUID, Dict[str, Any]] = {}
+        base_state_map: Dict[str, Set[uuid.UUID]] = {}
+        for row in base_rows:
+            std_id = row['id']
+            state = row['state__code'] or ''
+            entry = {
+                'id': str(std_id),
+                'code': row['code'],
+                'title': row['title'] or '',
+                'description': row['description'] or '',
+                'state__code': state,
+                'proxy_titles': [],
+            }
+            base_entry_map[std_id] = entry
+            if state:
+                base_state_map.setdefault(state, set()).add(std_id)
+
+        cluster_qs = Standard.objects.filter(id__in=scope_standard_ids)
+        if grade_levels:
+            cluster_qs = cluster_qs.filter(grade_levels__grade_numeric__in=grade_levels).distinct()
+        cluster_rows = list(
+            cluster_qs.values('id', 'state__code')
+        )
+
+        cluster_state_map: Dict[str, Set[uuid.UUID]] = {}
+        for row in cluster_rows:
+            std_id = row['id']
+            state = row['state__code'] or ''
+            cluster_state_map.setdefault(state, set()).add(std_id)
+
+        states = sorted(set(base_state_map.keys()) | set(cluster_state_map.keys()))
+
+        result = []
+        covered_ids_set: Set[uuid.UUID] = set()
+        for state in states:
+            base_ids = base_state_map.get(state, set())
+            if not base_ids:
+                continue
+            covered_ids = (cluster_state_map.get(state, set()) & base_ids)
+            covered_ids_set.update(covered_ids)
+
+            covered_entries = [dict(base_entry_map[sid]) for sid in covered_ids]
+            not_covered_ids = base_ids - covered_ids
+            not_covered_entries = [dict(base_entry_map[sid]) for sid in not_covered_ids]
+
+            coverage_percentage = (
+                (len(covered_ids) / len(base_ids) * 100) if base_ids else 0.0
+            )
+
             result.append({
-                'state': code,
-                'covered_count': len(standards_list),
-                'total_count': len(standards_list),
-                'coverage_percentage': 100.0 if standards_list else 0.0,
-                'covered': [
-                    {
-                        'id': str(item['id']),
-                        'code': item['code'],
-                        'title': item['title'] or '',
-                        'description': item['description'] or '',
-                        'state__code': item['state__code'] or '',
-                        'proxy_titles': [],
-                    }
-                    for item in standards_list
-                ],
-                'not_covered': [],
+                'state': state,
+                'covered_count': len(covered_entries),
+                'total_count': len(base_ids),
+                'coverage_percentage': round(coverage_percentage, 2),
+                'covered': covered_entries,
+                'not_covered': not_covered_entries,
             })
 
         result.sort(key=lambda x: x['state'])
@@ -785,7 +838,7 @@ def proxy_run_proxies_api(request):
         if not report_scope:
             return view.validation_error_response('report_id is required when run_id is not provided')
 
-        standards_in_scope, proxy_items, covered_all_ids = _build_report_cluster_items(
+        standards_in_scope, proxy_items, covered_all_ids, not_covered = _build_report_cluster_items(
             report_scope,
             grade_levels=grade_levels,
             state_code=state_code,
@@ -800,7 +853,7 @@ def proxy_run_proxies_api(request):
             'standards_in_scope_count': len(standards_in_scope),
             'standards_in_scope': standards_in_scope,
             'proxies': proxy_items,
-            'not_covered': [],
+            'not_covered': not_covered,
             'parameters': {
                 'grade_levels': grade_levels,
                 'state_filter': state_code,

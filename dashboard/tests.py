@@ -129,7 +129,15 @@ class BaseReportScopeTestCase(TestCase):
             description='Summarize a text including main ideas.'
         )
 
-        for standard in [self.standard_a, self.standard_b, self.standard_c]:
+        self.standard_extra = Standard.objects.create(
+            state=self.state_ts,
+            subject_area=self.subject_area,
+            code='TS.ELA.3.99',
+            title='Author Purpose',
+            description='Determine author purpose for third grade texts.'
+        )
+
+        for standard in [self.standard_a, self.standard_b, self.standard_c, self.standard_extra]:
             standard.grade_levels.add(self.grade_level)
 
         self.cluster_one = TopicCluster.objects.create(
@@ -324,6 +332,7 @@ class ProxyRunCoverageReportAPITestCase(BaseReportScopeTestCase):
         not_covered_ids = {str(item['id']) for item in payload['not_covered']}
         self.assertIn(str(self.standard_b.id), not_covered_ids)
         self.assertNotIn(str(self.standard_c.id), not_covered_ids)
+        self.assertNotIn(str(self.standard_extra.id), not_covered_ids)
 
         self.assertEqual(payload['standards_in_scope_count'], 3)
 
@@ -382,5 +391,6 @@ class ProxyRunCoverageReportAPITestCase(BaseReportScopeTestCase):
 
         self.assertEqual(proxy_map['ELA Main Idea']['covered_count'], 2)
         self.assertEqual(proxy_map['ELA Summaries']['covered_count'], 1)
-        self.assertEqual(payload['not_covered'], [])
-        self.assertEqual(payload['standards_in_scope_count'], 3)
+        not_covered_codes = {item['code'] for item in payload['not_covered']}
+        self.assertIn('TS.ELA.3.99', not_covered_codes)
+        self.assertEqual(payload['standards_in_scope_count'], 4)
