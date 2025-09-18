@@ -964,18 +964,7 @@
             controlsDiv.className = 'mt-2';
             controlsDiv.innerHTML = `
                 <div class="row align-items-center">
-                    <div class="col-md-8">
-                        <div class="alert alert-info py-2 mb-0">
-                            <small>
-                                <strong>3D Navigation:</strong> 
-                                <i class="fas fa-mouse-pointer"></i> Click and drag to rotate • 
-                                <i class="fas fa-search-plus"></i> Scroll to zoom • 
-                                <i class="fas fa-arrows-alt"></i> Shift+drag to pan • 
-                                <i class="fas fa-home"></i> Use toolbar to reset view
-                            </small>
-                        </div>
-                    </div>
-                    <div class="col-md-4 text-end">
+                    <div class="col-md-12">
                         <div class="form-check form-switch">
                             <input class="form-check-input" type="checkbox" id="toggle3dBoundaries" checked>
                             <label class="form-check-label small" for="toggle3dBoundaries">
