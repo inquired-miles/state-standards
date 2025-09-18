@@ -18,9 +18,11 @@
         <option value="">Choose a run or coverage report…</option>
         <optgroup label="Proxy Runs">
         {% for r in runs %}
-          <option value="run:{{ r.run_id }}" {% if selected_run and r.run_id == selected_run.run_id %}selected{% endif %}>
+          {% with sel=r.filter_parameters.grade_selection %}
+          <option value="run:{{ r.run_id }}"{% if selected_run and r.run_id == selected_run.run_id %} selected{% endif %}{% if sel %}{% if sel.type == 'specific' %} data-grade-selection="specific:{{ sel.grades|join:',' }}"{% elif sel.type == 'range' and sel.min_grade is not None and sel.max_grade is not None %} data-grade-selection="range:{{ sel.min_grade }}-{{ sel.max_grade }}"{% endif %}{% endif %}>
             {{ r.name }} ({{ r.get_run_type_display }}) — {{ r.started_at|date:"Y-m-d H:i" }}
           </option>
+          {% endwith %}
         {% endfor %}
         </optgroup>
       </select>
@@ -206,6 +208,64 @@
   // Chart variables
   let coverageChart = null;
   const ctx = document.getElementById('coverageChart').getContext('2d');
+  let lastSelectionKey = null;
+
+  function deriveGradesFromRunSelection(selection) {
+    if (!selection || selection.type !== 'run' || !runSelect) {
+      return null;
+    }
+    const option = runSelect.querySelector(`option[value="run:${selection.id}"]`);
+    if (!option) {
+      return null;
+    }
+    const raw = option.dataset.gradeSelection || '';
+    if (!raw) {
+      return null;
+    }
+    const [mode, payload] = raw.split(':');
+    if (mode === 'specific') {
+      return payload || '';
+    }
+    if (mode === 'range') {
+      const [minStr, maxStr] = (payload || '').split('-');
+      const min = parseInt(minStr, 10);
+      const max = parseInt(maxStr, 10);
+      if (Number.isFinite(min) && Number.isFinite(max) && max >= min) {
+        const values = [];
+        for (let g = min; g <= max; g += 1) {
+          values.push(g);
+        }
+        return values.join(',');
+      }
+    }
+    return null;
+  }
+
+  function applyDefaultGradesForSelection(selection, force = false) {
+    if (!gradesInput) {
+      return;
+    }
+    const selectionKey = selection ? `${selection.type}:${selection.id}` : '';
+    if (!force && selectionKey === lastSelectionKey) {
+      return;
+    }
+
+    if (!selection) {
+      gradesInput.value = '';
+      return;
+    }
+
+    if (selection.type === 'run') {
+      const derived = deriveGradesFromRunSelection(selection);
+      if (derived !== null) {
+        gradesInput.value = derived;
+      } else if (!gradesInput.value) {
+        gradesInput.value = '';
+      }
+    } else {
+      gradesInput.value = '';
+    }
+  }
 
   function parseSelection(value) {
     if (!value) {
@@ -601,45 +661,56 @@
   }
 
   async function loadCoverage(){
-    const selection = parseSelection(runSelect.value);
+    let selection = parseSelection(runSelect.value);
     const fallbackRun = getQueryParam('run_id');
     const fallbackReport = getQueryParam('report_id');
-    const inferredSelection = selection
-      || (fallbackRun ? { type: 'run', id: fallbackRun } : null)
-      || (fallbackReport ? { type: 'report', id: fallbackReport } : null);
 
-    if (!inferredSelection) {
+    if (!selection) {
+      if (fallbackRun) {
+        selection = { type: 'run', id: fallbackRun };
+        if (runSelect && !runSelect.value) {
+          runSelect.value = `run:${fallbackRun}`;
+        }
+      } else if (fallbackReport) {
+        selection = { type: 'report', id: fallbackReport };
+        if (runSelect && !runSelect.value) {
+          runSelect.value = `report:${fallbackReport}`;
+        }
+      }
+    }
+
+    const selectionKey = selection ? `${selection.type}:${selection.id}` : '';
+
+    if (!selection) {
+      lastSelectionKey = null;
       showStatus('Select a proxy run or coverage report to view coverage.', 'alert-warning');
       return;
     }
 
-    if (!selection && inferredSelection) {
-      const value = `${inferredSelection.type}:${inferredSelection.id}`;
-      if (runSelect.value !== value) {
-        runSelect.value = value;
-      }
+    if (selectionKey !== lastSelectionKey) {
+      applyDefaultGradesForSelection(selection, true);
     }
 
     loadBtn.disabled = true;
     document.getElementById('loadSpinner').style.display = 'inline-block';
     document.getElementById('loadText').textContent = 'Loading...';
     clearStatus();
-    
+
     try {
       showStatus('Loading coverage…', 'alert-secondary');
-      const grades = gradesInput.value.trim();
+      const grades = gradesInput ? gradesInput.value.trim() : '';
       const state = stateSelect.value;
       let data;
-      let selectionLabel = getSelectionLabel(inferredSelection);
+      const selectionLabel = getSelectionLabel(selection);
 
-      if (inferredSelection.type === 'run') {
-        setQueryParam('run_id', inferredSelection.id);
+      if (selection.type === 'run') {
+        setQueryParam('run_id', selection.id);
         setQueryParam('report_id', '');
-        data = await fetchCoverage(inferredSelection.id, grades, state, null);
-      } else if (inferredSelection.type === 'report') {
-        setQueryParam('report_id', inferredSelection.id);
+        data = await fetchCoverage(selection.id, grades, state, null);
+      } else if (selection.type === 'report') {
+        setQueryParam('report_id', selection.id);
         setQueryParam('run_id', '');
-        data = await fetchCoverage(null, grades, state, inferredSelection.id);
+        data = await fetchCoverage(null, grades, state, selection.id);
       } else {
         throw new Error('Unsupported selection type');
       }
@@ -649,16 +720,13 @@
       renderTable(data.states || []);
       attachRowHandlers();
       applyTableFilter();
-      
+
       createCoverageChart(data.states || []);
       updateCoverageSummary(data.states || []);
 
-      const statusMsg = selectionLabel
-        ? `Loaded ${(data.states || []).length} state rows (${selectionLabel})`
-        : `Loaded ${(data.states || []).length} state rows`;
-      showStatus(statusMsg, 'alert-success');
+      clearStatus();
 
-      await loadProxies(inferredSelection);
+      await loadProxies(selection);
     } catch (e) {
       console.error('Error loading coverage:', e);
       showStatus('Error: ' + e.message, 'alert-danger');
@@ -667,6 +735,8 @@
       document.getElementById('loadSpinner').style.display = 'none';
       document.getElementById('loadText').textContent = 'Load Coverage';
     }
+
+    lastSelectionKey = selectionKey;
   }
 
   async function loadProxies(selection){
@@ -676,7 +746,7 @@
       return;
     }
 
-    const grades = gradesInput.value.trim();
+    const grades = gradesInput ? gradesInput.value.trim() : '';
     const state = stateSelect.value;
     const params = new URLSearchParams();
     if (effectiveSelection.type === 'run') {
@@ -870,6 +940,10 @@
     runSelect.addEventListener('change', () => {
       if (!runSelect.value) {
         statusDiv.classList.add('d-none');
+        if (gradesInput) {
+          gradesInput.value = '';
+        }
+        lastSelectionKey = null;
         return;
       }
       loadCoverage();

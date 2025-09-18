@@ -85,6 +85,7 @@ def _build_run_state_coverage(
     state_code: Optional[str],
     grade_levels: Optional[List[int]],
     scope_standard_ids: Optional[Set[uuid.UUID]],
+    subject_area_id: Optional[int],
 ):
     """Compute state coverage details for a proxy run."""
 
@@ -92,8 +93,11 @@ def _build_run_state_coverage(
     if state_code:
         states = [state_code]
     elif scope_standard_ids is not None:
+        scoped_qs = Standard.objects.filter(id__in=scope_standard_ids)
+        if subject_area_id is not None:
+            scoped_qs = scoped_qs.filter(subject_area_id=subject_area_id)
         scoped_states = (
-            Standard.objects.filter(id__in=scope_standard_ids)
+            scoped_qs
             .exclude(state__code__isnull=True)
             .values_list('state__code', flat=True)
             .distinct()
@@ -103,10 +107,16 @@ def _build_run_state_coverage(
         states_set = set()
         for proxy in proxies:
             if hasattr(proxy, 'member_atoms') and proxy.member_atoms.exists():
-                member_states = proxy.member_atoms.values_list('standard__state__code', flat=True)
+                member_query = proxy.member_atoms.all()
+                if subject_area_id is not None:
+                    member_query = member_query.filter(standard__subject_area_id=subject_area_id)
+                member_states = member_query.values_list('standard__state__code', flat=True)
                 states_set.update(code for code in member_states if code)
             elif hasattr(proxy, 'member_standards') and proxy.member_standards.exists():
-                member_states = proxy.member_standards.values_list('state__code', flat=True)
+                member_query = proxy.member_standards.all()
+                if subject_area_id is not None:
+                    member_query = member_query.filter(subject_area_id=subject_area_id)
+                member_states = member_query.values_list('state__code', flat=True)
                 states_set.update(code for code in member_states if code)
         states = sorted(states_set)
 
@@ -122,6 +132,8 @@ def _build_run_state_coverage(
                 member_query = member_query.filter(
                     standard__grade_levels__grade_numeric__in=grade_levels
                 ).distinct()
+            if subject_area_id is not None:
+                member_query = member_query.filter(standard__subject_area_id=subject_area_id)
             if scope_standard_ids is not None:
                 member_query = member_query.filter(standard_id__in=scope_standard_ids)
 
@@ -136,6 +148,8 @@ def _build_run_state_coverage(
                 member_query = member_query.filter(
                     grade_levels__grade_numeric__in=grade_levels
                 ).distinct()
+            if subject_area_id is not None:
+                member_query = member_query.filter(subject_area_id=subject_area_id)
             if scope_standard_ids is not None:
                 member_query = member_query.filter(id__in=scope_standard_ids)
 
@@ -153,6 +167,8 @@ def _build_run_state_coverage(
             state_standards_qs = state_standards_qs.filter(
                 grade_levels__grade_numeric__in=grade_levels
             ).distinct()
+        if subject_area_id is not None:
+            state_standards_qs = state_standards_qs.filter(subject_area_id=subject_area_id)
 
         all_ids = set(state_standards_qs.values_list('id', flat=True))
 
@@ -287,6 +303,7 @@ def _build_report_cluster_items(
             'title': row['title'] or '',
             'description': row['description'] or '',
             'state__code': row['state__code'] or '',
+            'proxy_titles': [],
         }
 
     standards_in_scope = sorted(
@@ -528,6 +545,9 @@ def proxy_run_coverage_api(request):
             grade_levels = view.validate_list_of_integers(grades_param, field_name="grades")
             grade_levels = view.validate_grade_levels(grade_levels)
 
+        subject_area_id_param = request.GET.get('subject_area_id')
+        subject_area_id = int(subject_area_id_param) if subject_area_id_param else None
+
         try:
             report_scope, scope_standard_ids, report_metadata, _ = _load_report_scope(view, request, report_id_param)
         except PermissionDenied as exc:
@@ -560,6 +580,7 @@ def proxy_run_coverage_api(request):
                 state_code=state_code,
                 grade_levels=grade_levels,
                 scope_standard_ids=scope_standard_ids,
+                subject_area_id=subject_area_id,
             )
 
             if report_scope is not None and report_metadata is not None:
@@ -587,6 +608,8 @@ def proxy_run_coverage_api(request):
             base_qs = base_qs.filter(grade_levels__grade_numeric__in=grade_levels)
         if state_code:
             base_qs = base_qs.filter(state__code=state_code)
+        if subject_area_id is not None:
+            base_qs = base_qs.filter(subject_area_id=subject_area_id)
         base_qs = base_qs.distinct()
 
         base_rows = list(
@@ -613,6 +636,8 @@ def proxy_run_coverage_api(request):
         cluster_qs = Standard.objects.filter(id__in=scope_standard_ids)
         if grade_levels:
             cluster_qs = cluster_qs.filter(grade_levels__grade_numeric__in=grade_levels).distinct()
+        if subject_area_id is not None:
+            cluster_qs = cluster_qs.filter(subject_area_id=subject_area_id)
         cluster_rows = list(
             cluster_qs.values('id', 'state__code')
         )
