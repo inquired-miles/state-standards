@@ -1,62 +1,8 @@
-<div class="card mb-4 {% if simple_mode %}d-none{% endif %}" id="viz-explanation">
-    <div class="card-body">
-        <h5 class="card-title"><i class="fas fa-lightbulb text-warning"></i> How Educational Standards Clustering Works</h5>
-        <div class="row">
-            <div class="col-md-4">
-                <h6>🎯 What You'll See</h6>
-                <p class="small">Each dot = one educational standard. Standards that teach similar concepts cluster together as colored groups.</p>
-                <div class="alert alert-info alert-sm py-2">
-                    <strong>Tip:</strong> Larger clusters = more states teaching similar concepts
-                </div>
-            </div>
-            <div class="col-md-4">
-                <h6>🎛️ Controls Guide</h6>
-                <ul class="small mb-2">
-                    <li><strong>Cluster Size:</strong> Minimum standards needed to form a group</li>
-                    <li><strong>Strictness:</strong> How similar standards must be to group together</li>
-                    <li><strong>Neighborhood:</strong> How many nearby standards to consider</li>
-                </ul>
-                <small class="text-muted">Try the <strong>Quick Presets</strong> below for common use cases!</small>
-            </div>
-            <div class="col-md-4">
-                <h6>📊 Reading Results</h6>
-                <p class="small">Look for:</p>
-                <ul class="small mb-0">
-                    <li><span class="badge bg-success">Large clusters</span> = Common concepts across states</li>
-                    <li><span class="badge bg-warning">Small clusters</span> = Specialized or unique approaches</li>
-                    <li><span class="badge bg-secondary">Scattered dots</span> = Unique standards</li>
-                </ul>
-                <div class="mt-2">
-                    <small class="text-muted">Use the <strong>Help</strong> button for detailed explanations.</small>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
 <div class="control-panel {% if simple_mode %}d-none{% endif %}" id="embeddings-control-panel">
-    <h5 class="mb-3"><i class="fas fa-sliders-h"></i> Clustering Controls</h5>
+    <h5 class="mb-3"><i class="fas fa-sliders-h"></i> Grouping Controls</h5>
     
-    <div class="preset-controls mb-4">
-        <h6><i class="fas fa-magic text-primary"></i> Quick Presets</h6>
-        <div class="btn-group" role="group">
-            <button type="button" class="btn btn-outline-primary btn-sm" onclick="applyPreset('broad-overview')">
-                <i class="fas fa-eye"></i> Broad Overview
-                <small class="d-block">See major topic areas</small>
-            </button>
-            <button type="button" class="btn btn-outline-success btn-sm" onclick="applyPreset('detailed-analysis')">
-                <i class="fas fa-search"></i> Detailed Analysis  
-                <small class="d-block">Find specific similarities</small>
-            </button>
-            <button type="button" class="btn btn-outline-info btn-sm" onclick="applyPreset('subject-focused')">
-                <i class="fas fa-book"></i> Subject Focused
-                <small class="d-block">Group by subject areas</small>
-            </button>
-        </div>
-    </div>
-
     <form id="controls-form" class="row g-3">
-        <div class="col-md-3">
+        <div class="col-md-2">
             <label for="grade-level" class="form-label">
                 <i class="fas fa-graduation-cap"></i> Grade Level
             </label>
@@ -67,7 +13,7 @@
                 {% endfor %}
             </select>
         </div>
-        <div class="col-md-3">
+        <div class="col-md-2">
             <label for="subject-area" class="form-label">
                 <i class="fas fa-book-open"></i> Subject Area
             </label>
@@ -80,13 +26,13 @@
         </div>
         <div class="col-md-3">
             <label for="cluster-size" class="form-label">
-                <i class="fas fa-layer-group"></i> Min Cluster Size
+                <i class="fas fa-layer-group"></i> Number of Groups
             </label>
             <input type="range" class="form-range" id="cluster-size" min="2" max="30" value="5">
             <div class="d-flex justify-content-between small text-muted">
-                <span>Specific (2)</span>
+                <span>Broad (2)</span>
                 <span id="cluster-size-value" class="fw-bold">5</span>
-                <span>Broad (30)</span>
+                <span>Specific (30)</span>
             </div>
         </div>
         <div class="col-md-3">
@@ -101,7 +47,7 @@
             </div>
         </div>
 
-        <div class="col-md-3">
+        <div class="col-md-2">
             <label for="viz-mode" class="form-label">
                 <i class="fas fa-cube"></i> View Mode
             </label>
@@ -110,51 +56,17 @@
                 <option value="3d">3D Scatter</option>
             </select>
         </div>
-        <div class="col-md-3">
-            <label for="n-neighbors" class="form-label">
-                <i class="fas fa-users"></i> Neighborhood Size
-            </label>
-            <input type="range" class="form-range" id="n-neighbors" min="5" max="50" value="15">
-            <div class="d-flex justify-content-between small text-muted">
-                <span>Local (5)</span>
-                <span id="n-neighbors-value" class="fw-bold">15</span>
-                <span>Global (50)</span>
-            </div>
-        </div>
-        <div class="col-md-4">
-            <label for="clustering-method" class="form-label">
-                <i class="fas fa-project-diagram"></i> Clustering Method
-            </label>
-            <select id="clustering-method" class="form-select">
-                <option value="hdbscan">Smart Density (Recommended)</option>
-                <option value="similarity">Simple Similarity</option>
-                <option value="hierarchical">Hierarchical Tree</option>
-            </select>
-        </div>
-        <div class="col-md-4">
-            <label for="subject-focus" class="form-label">
-                <i class="fas fa-balance-scale"></i> Subject Focus
-            </label>
-            <select id="subject-focus" class="form-select">
-                <option value="mixed">Mixed Subjects (Default)</option>
-                <option value="prefer-same">Prefer Same Subject</option>
-                <option value="separate-subjects">Separate by Subject</option>
-            </select>
-        </div>
     </form>
 
     <div class="row mt-3">
         <div class="col-md-8">
-            <button type="button" id="update-viz" class="btn btn-primary">
-                <i class="fas fa-sync-alt"></i> Update Report
-            </button>
-        </div>
-        <div class="col-md-4 text-end">
             <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="collapse" data-bs-target="#advanced-controls" aria-expanded="false">
                 <i class="fas fa-cogs"></i> Advanced Settings
             </button>
-            <button type="button" class="btn btn-outline-info btn-sm" data-bs-toggle="modal" data-bs-target="#clustering-help">
-                <i class="fas fa-question-circle"></i> Help
+        </div>
+        <div class="col-md-4 text-end">
+            <button type="button" id="update-viz" class="btn btn-primary">
+                <i class="fas fa-sync-alt"></i> Update Groups
             </button>
         </div>
     </div>
@@ -162,6 +74,39 @@
     <div class="collapse mt-3" id="advanced-controls">
         <div class="card card-body">
             <h6 class="mb-3">Advanced Parameters</h6>
+            <div class="row g3">
+                <div class="col-md-3">
+                    <label for="n-neighbors" class="form-label">
+                        <i class="fas fa-users"></i> Neighborhood Size
+                    </label>
+                    <input type="range" class="form-range" id="n-neighbors" min="5" max="50" value="15">
+                    <div class="d-flex justify-content-between small text-muted">
+                        <span>Local (5)</span>
+                        <span id="n-neighbors-value" class="fw-bold">15</span>
+                        <span>Global (50)</span>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <label for="clustering-method" class="form-label">
+                        <i class="fas fa-project-diagram"></i> Clustering Method
+                    </label>
+                    <select id="clustering-method" class="form-select">
+                        <option value="hdbscan">Smart Density (Recommended)</option>
+                        <option value="similarity">Simple Similarity</option>
+                        <option value="hierarchical">Hierarchical Tree</option>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label for="subject-focus" class="form-label">
+                        <i class="fas fa-balance-scale"></i> Subject Focus
+                    </label>
+                    <select id="subject-focus" class="form-select">
+                        <option value="mixed">Mixed Subjects (Default)</option>
+                        <option value="prefer-same">Prefer Same Subject</option>
+                        <option value="separate-subjects">Separate by Subject</option>
+                    </select>
+                </div>
+            </div>
             <div class="row g-3">
                 <div class="col-md-3">
                     <label for="max-standards" class="form-label">Max Standards</label>
@@ -183,18 +128,18 @@
 <ul class="nav nav-tabs" id="viz-tabs" role="tablist">
     <li class="nav-item" role="presentation">
         <button class="nav-link active" id="scatter-tab" data-bs-toggle="tab" data-bs-target="#scatter-pane" type="button" role="tab">
-            📍 Semantic Clustering
+            📍 Concept Groups
         </button>
     </li>
     <li class="nav-item" role="presentation">
         <button class="nav-link" id="heatmap-tab" data-bs-toggle="tab" data-bs-target="#heatmap-pane" type="button" role="tab">
-            Similarity Matrix
+            Similarity Maps
         </button>
     </li>
     {% if not simple_mode %}
     <li class="nav-item" role="presentation">
         <button class="nav-link" id="search-tab" data-bs-toggle="tab" data-bs-target="#search-pane" type="button" role="tab">
-            Semantic Search
+            Find Related Standards
         </button>
     </li>
     {% endif %}
@@ -207,25 +152,14 @@
                 <h5 class="mb-0">📊 Topic Clusters</h5>
                 <span id="scatter-info" class="text-muted">Loading...</span>
             </div>
-            <div class="alert alert-info py-2 mb-3">
-                <small><strong>Interpretation:</strong> Points closer together have more similar context. Distinct clusters represent different pedagogical approaches or subject.</small>
-            </div>
             <div class="position-relative">
                 <div id="scatter-plot" class="scatter-plot"></div>
                 <div id="scatter-loading" class="loading-overlay d-none">
                     <div class="spinner-border text-primary" role="status"></div>
                 </div>
             </div>
-            <div class="mt-3 mb-3">
-                <h6><i class="fas fa-palette"></i> Topic Categories</h6>
-                <div class="d-flex flex-wrap gap-2 small">
-                    <span><span class="badge bg-info me-1"></span>Government & Civics</span>
-                    <span><span class="badge bg-success me-1"></span>Geography & Maps</span>
-                    <span><span class="badge bg-warning me-1"></span>History & Timeline</span>
-                    <span><span class="badge bg-danger me-1"></span>Mathematics</span>
-                    <span><span class="badge bg-dark me-1"></span>Science</span>
-                    <span><span class="badge bg-primary me-1"></span>Other Topics</span>
-                </div>
+            <div class="alert alert-info py-2 mb-3">
+                <small><strong>Interpretation:</strong> Dots closer together have more similar context. Distinct groups represent different concepts or subject.</small>
             </div>
             <div id="cluster-info" class="mt-3"></div>
         </div>
@@ -281,7 +215,7 @@
     {% if not simple_mode %}
     <div class="tab-pane fade" id="search-pane" role="tabpanel">
         <div class="visualization-container">
-            {% include 'dashboard/partials/semantic_search.html' with title='Semantic Concept Search' enable_selection=False mode='view' %}
+            {% include 'dashboard/partials/semantic_search.html' with title='Find Standards by Topics, Concepts, and more' enable_selection=False mode='view' %}
         </div>
     </div>
     {% endif %}

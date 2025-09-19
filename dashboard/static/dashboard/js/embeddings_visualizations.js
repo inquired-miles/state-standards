@@ -1218,24 +1218,6 @@
             return;
         }
         
-        // Add Understanding Your Results section only (removed redundant cluster info)
-        const resultsHelp = document.createElement('div');
-        resultsHelp.className = 'alert alert-light border-start border-primary border-3 mb-4';
-        resultsHelp.innerHTML = `
-            <h6><i class="fas fa-chart-pie text-primary"></i> Understanding Your Results</h6>
-            <div class="row">
-                <div class="col-12">
-                    <strong>What to look for:</strong>
-                    <ul class="small mb-0">
-                        <li><strong>Large clusters:</strong> Concepts taught across many states</li>
-                        <li><strong>State-specific clusters:</strong> Unique state approaches</li>
-                        <li><strong>Grade-level patterns:</strong> How concepts progress through grades</li>
-                    </ul>
-                </div>
-            </div>
-        `;
-        
-        container.appendChild(resultsHelp);
         
         clusters.forEach((cluster, index) => {
             const clusterId = `cluster-${cluster.id}`;

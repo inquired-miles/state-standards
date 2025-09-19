@@ -134,8 +134,8 @@ def proxies_dashboard(request):
 def embeddings_dashboard(request):
     """Standards Embeddings Visualization Dashboard"""
     context = {
-        'title': 'Standards Embeddings Visualization',
-        'subtitle': 'Explore state philosophical alignments and semantic relationships',
+        'title': 'Concept Explorer',
+        'subtitle': 'Discover patterns across state standards.',
         'subject_areas': SubjectArea.objects.all(),
         'grade_levels': GradeLevel.objects.all().order_by('grade_numeric'),
     }
@@ -146,8 +146,8 @@ def embeddings_dashboard(request):
 def custom_clusters_dashboard(request):
     """Dashboard for managing user-created custom clusters and comparison reports"""
     context = {
-        'title': 'Custom Clusters',
-        'subtitle': 'Curate semantic groups of standards and compare coverage across states',
+        'title': 'Coverage Playground',
+        'subtitle': 'Build, compare, and save your own groups of related standards.',
         'subject_areas': SubjectArea.objects.all(),
         'grade_levels': GradeLevel.objects.all().order_by('grade_numeric'),
         'states': State.objects.all().order_by('name'),
@@ -229,8 +229,8 @@ def proxy_runs_dashboard(request):
             selected_run = None
     
     context = {
-        'title': 'Proxy Run Analysis',
-        'subtitle': 'Analyze and compare proxy generation results',
+        'title': 'State Coverage Report',
+        'subtitle': 'Review cross-state mapping runs and compare their coverage.',
         'runs': runs,
         'selected_run': selected_run,
         'report_data': report_data,
